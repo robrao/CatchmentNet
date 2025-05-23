@@ -1,4 +1,4 @@
-# Substack Gmail Sync Plugin for Obsidian
+# Catchment Net
 
 A plugin that automatically syncs your Substack newsletter subscriptions from Gmail into Obsidian notes.
 
