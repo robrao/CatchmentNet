@@ -91,10 +91,6 @@ A plugin that automatically syncs your Substack newsletter subscriptions from Gm
 4. Add tests if applicable
 5. Submit a pull request
 
-## License
-
-MIT License - see LICENSE file for details
-
 ## Support
 
 If you find this plugin helpful, consider:
@@ -102,8 +98,10 @@ If you find this plugin helpful, consider:
 - 🐛 Reporting bugs
 - 💡 Suggesting features
 
-<a href="https://www.buymeacoffee.com/prolixor" target="_blank">
-  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png" 
-       alt="Buy Me A Coffee" 
-       style="height: 60px !important;width: 217px !important;" />
-</a>
+<p align="center">
+  <a href="https://www.buymeacoffee.com/prolixor" target="_blank">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-blue.png"
+         alt="Buy Me A Coffee"
+         style="height: 60px !important;width: 217px !important;" />
+  </a>
+</p>
