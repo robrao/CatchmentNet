@@ -1,0 +1,11 @@
+{
+	"id": "catchmentnet",
+	"name": "Catchment Net",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Sync Substack newsletters from Gmail into Obsidian notes",
+	"author": "Robby Rao",
+	"authorUrl": "https://github.com/robrao",
+	"fundingUrl": "https://buymeacoffee.com/prolixor",
+	"isDesktopOnly": false
+}
