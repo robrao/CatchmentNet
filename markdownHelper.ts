@@ -3,6 +3,19 @@ function htmlToMarkdown(htmlContent) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(htmlContent, 'text/html');
     
+    // Remove unwanted elements (but preserve "read in app" links)
+    const unwantedSelectors = [
+        'style', 'script', 'img[src*="tracking"]', 'img[width="1"]',
+        '.email-body-container', '.preview', '.footer',
+        'table[role="presentation"]', '.share-button-container',
+        '.email-ufi-2-top', '.email-ufi-2-bottom', '.postscript',
+        'a[href*="unsubscribe"]'
+    ];
+
+    unwantedSelectors.forEach(selector => {
+        doc.querySelectorAll(selector).forEach(el => el.remove());
+    });
+
     let markdown = '';
     
     // Extract title
@@ -157,24 +170,26 @@ function processInlineElements(element) {
             text += node.textContent;
         } else if (node.nodeType === 1) { // ELEMENT_NODE
             const tagName = node.tagName.toLowerCase();
-            const nodeText = node.textContent;
             
             switch (tagName) {
                 case 'strong':
                 case 'b':
-                    // XXX: testing
-                    console.log(`Strong Case: ${nodeText}`)
-                    text += `**${nodeText}**`;
+                    // Recursively process content inside strong tags to preserve nested links
+                    const strongContent = processInlineElements(node);
+                    text += `**${strongContent}**`;
                     break;
                 case 'em':
                 case 'i':
-                    text += `*${nodeText}*`;
+                    // Recursively process content inside em tags to preserve nested links
+                    const emContent = processInlineElements(node);
+                    text += `*${emContent}*`;
                     break;
                 case 'code':
-                    text += `\`${nodeText}\``;
+                    text += `\`${node.textContent}\``;
                     break;
                 case 'a':
                     const href = node.getAttribute('href');
+                    const linkText = node.textContent;
                     if (href && !href.includes('unsubscribe')) {
                         // More specific filtering: only filter out internal app functionality
                         // Preserve all redirect URLs and external links
@@ -186,27 +201,28 @@ function processInlineElements(element) {
                                                     href.includes('submitLike=true'));
         
                         if (isInternalAppAction) {
-                            text += nodeText;
+                            text += linkText; // Just text, no link
                         } else {
-                            text += `[${nodeText}](${href})`;
+                            text += `[${linkText}](${href})`; // Preserve the link
                         }
                     } else {
-                        text += nodeText;
+                        text += linkText;
                     }
                     break;
                 case 'span':
                     // Handle footnote anchors
                     if (node.classList && node.classList.contains('footnote-anchor-email')) {
-                        text += `[^${nodeText}]`;
+                        text += `[^${node.textContent}]`;
                     } else {
-                        text += nodeText;
+                        // Recursively process spans in case they contain nested formatting
+                        text += processInlineElements(node);
                     }
                     break;
                 case 'br':
                     text += '\n';
                     break;
                 default:
-                    // For nested elements, recursively process
+                    // For any other nested elements, recursively process to preserve formatting
                     text += processInlineElements(node);
             }
         }
@@ -235,6 +251,6 @@ function cleanMarkdown(markdown) {
 export function convertHtmltoMarkdown(htmlContent: string): string {
     const markdown = htmlToMarkdown(htmlContent);
     const cleanedMarkdown = cleanMarkdown(markdown);
-    
+
     return cleanedMarkdown;
 }
