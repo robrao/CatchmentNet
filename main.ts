@@ -1,26 +1,55 @@
 // main.ts
-import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, TFolder, requestUrl } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, TFolder } from 'obsidian';
+import { google } from 'googleapis';
+import { OAuth2Client } from 'google-auth-library';
+import { assertPresent } from 'typeHelpers';
+import { convertHtmltoMarkdown } from 'markdownHelper';
+
+// import * as open from 'open';
+import * as http from 'http';
+import * as url from 'url';
+
+
+let server_ = http.createServer()
 
 interface SubstackGmailSettings {
-	gmailApiKey: string;
-	clientId: string;
-	clientSecret: string;
-	accessToken: string;
-	refreshToken: string;
+	client_id: string;
+	client_secret: string;
+	access_token: string;
 	substackFolder: string;
 	maxEmails: number;
 	syncFrequency: number; // in minutes
+	scopes: Array<string>;
+	redirect_uris: Array<string>;
+	refresh_token: string;
+	token_type: string;
+	refresh_token_expires_in: number;
+	expiry_date: number;
+	refresh_token_expiry: number;
+}
+
+interface GmailTokens {
+	access_token: string;
+	refresh_token: string;
+	token_type: string;
+	refresh_token_expires_in: number;
+	expiry_date: number;
 }
 
 const DEFAULT_SETTINGS: SubstackGmailSettings = {
-	gmailApiKey: '',
-	clientId: '',
-	clientSecret: '',
-	accessToken: '',
-	refreshToken: '',
-	substackFolder: 'Substack Newsletters',
+	client_id: '',
+	client_secret: '',
+	access_token: '',
+	substackFolder: 'Catchment',
 	maxEmails: 50,
-	syncFrequency: 60
+	syncFrequency: 60,
+	scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+	redirect_uris: [],
+	refresh_token: '',
+	token_type: '',
+	refresh_token_expires_in: 0,
+	expiry_date: 0,
+	refresh_token_expiry: 0
 };
 
 interface GmailMessage {
@@ -32,14 +61,18 @@ interface GmailMessage {
 		body?: { data?: string };
 		parts?: Array<{ mimeType: string; body: { data?: string } }>;
 	};
+	labelIds: Array<string>;
 }
 
 export default class SubstackGmailPlugin extends Plugin {
 	settings: SubstackGmailSettings;
 	syncInterval: number | null = null;
+	oAuth2Client: OAuth2Client | null = null;
+	gmail: any = null;
 
 	async onload() {
 		await this.loadSettings();
+		this.initializeGoogleAuth();
 
 		// Add ribbon icon
 		this.addRibbonIcon('mail', 'Sync Substack Newsletters', (evt: MouseEvent) => {
@@ -68,6 +101,7 @@ export default class SubstackGmailPlugin extends Plugin {
 		if (this.syncInterval) {
 			window.clearInterval(this.syncInterval);
 		}
+		server_.close()
 	}
 
 	async loadSettings() {
@@ -76,6 +110,156 @@ export default class SubstackGmailPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		this.initializeGoogleAuth(); // Reinitialize auth when settings change
+	}
+
+	async getPortFromURI(uri: string): Promise<number> {
+		const match = uri.match(/:([0-9]+)/m) || [];
+
+		return Number(match[1])
+	}
+
+	async getNewTokens(): Promise<GmailTokens> {
+		const authUrl = this.oAuth2Client.generateAuthUrl({
+			access_type: 'offline',
+			scope: this.settings.scopes,
+			prompt: 'consent'
+		})
+		const LISTEN_PORT = await this.getPortFromURI(this.settings.redirect_uris[0])
+
+		return new Promise((resolve, reject) => {
+			if (server_.listening) {
+				console.log("Server is listening on port, destroy before creating new one.")
+				server_.close()
+			}
+
+			server_ = http.createServer(async (req, res) => {
+				try {
+					// XXX: testing
+					console.log(`HERE IN SERVER NOW...`)
+					if (req.url && req.url.indexOf('/oauth2callback') > -1) {
+						const qs = new url.URL(req.url, this.settings.redirect_uris[0]).searchParams
+						
+						// Send HTML with auto-close script
+						// XXX: the script does not auto close the window
+            			res.writeHead(200, { 'Content-Type': 'text/html' });
+            			res.end(`
+            			    <html>
+            			        <head><title>Authorization Complete</title></head>
+            			        <body>
+            			            <h2>Authorization succeeded!</h2>
+            			            <p>This window will close automatically...</p>
+            			            <script>
+            			                setTimeout(() => {
+            			                    window.close();
+            			                }, 2000); // Close after 2 seconds
+            			            </script>
+            			        </body>
+            			    </html>
+            			`);
+
+						// res.end("Authorization succeeded. You can close this window.")
+						// XXX: testing
+						console.log(`Closing Server...`)
+						server_.close()
+						
+						const code = qs.get("code")
+						assertPresent(code, "Could not get token code.")
+						const { tokens } = await this.oAuth2Client.getToken(code)
+						this.oAuth2Client.setCredentials(tokens)
+						
+						resolve(tokens as any)
+					} 
+				} catch (err) {
+					// XXX: testing
+					console.log(`Error parsing auth token data: ${JSON.stringify(err)}`)
+					reject(err)
+				}
+			})
+
+			server_.listen(LISTEN_PORT, () => {
+				window.open(authUrl)
+			})
+		})
+	}
+
+	async initializeGoogleAuth() {
+		const currentDate = Date.now()
+		const expiryDate = this.settings.refresh_token_expiry
+		const notExpired = expiryDate > currentDate
+		const isInitialized = this.oAuth2Client?.credentials?.refresh_token
+		// XXX: testing
+		console.log(`Initialize Auth...${isInitialized} && ${notExpired}`)
+		if (isInitialized && notExpired) {
+			// XXX: testing
+			console.log(`oAuth2Client already initialized...${JSON.stringify(this.oAuth2Client)}`)
+			console.log(`Expired: ${notExpired}`)
+			console.log(`Expiry date: ${this.oAuth2Client?.credentials.expiry_date}`)
+			console.log(`Current Date: ${currentDate}`)
+			console.log(`Refresh Expires: ${this.settings.refresh_token_expires_in}`)
+			return
+		}
+
+		// XXX: testing
+		if (!notExpired) {
+			console.log(`Token is expired: ${expiryDate} < ${currentDate}`)
+		}
+
+		if (!this.settings.access_token) {
+			// XXX: testing
+			console.log(`Loading Data...`)
+			try {
+				const credentials = await this.loadData()
+				const { client_secret, client_id, redirect_uris, access_token } = credentials.installed
+				this.settings.client_id = client_id
+				this.settings.client_secret = client_secret
+				this.settings.redirect_uris = redirect_uris
+				this.settings.access_token = access_token
+			} catch (error) {
+				console.error('Failed to retreive credentials:', error);
+				new Notice('Failed to retreieve credentials');
+			}
+		}
+
+		if (this.settings.client_id && this.settings.client_secret) {
+			// XXX: testing
+			console.log(`Add ID and Secret and URIs to oAuth`)
+			try {
+				this.oAuth2Client = new google.auth.OAuth2(
+					this.settings.client_id,
+					this.settings.client_secret,
+					this.settings.redirect_uris[0]
+				)
+			} catch (error) {
+				console.error('Failed to initialize Google Authorization:', error);
+				new Notice('Failed to intialize Google Authorization');
+			}
+
+			if (this.settings.access_token && this.settings.refresh_token && notExpired) {
+				this.oAuth2Client.setCredentials({
+					access_token: this.settings.access_token,
+					refresh_token: this.settings.refresh_token,
+					expiry_date: this.settings.expiry_date,
+				});
+
+				this.gmail = google.gmail({ version: 'v1', auth: this.oAuth2Client });
+				// XXX: testing
+				console.log(`Gmail Client Intialized...`)
+			} else {
+				// XXX: testing
+				console.log('Getting new token for initiGoogleAuth...')
+				const tokens = await this.getNewTokens()
+				// XXX: testing
+				console.log(`Got token: ${JSON.stringify(tokens)}`)
+				this.settings.access_token = tokens.access_token
+				this.settings.refresh_token = tokens.refresh_token
+				this.settings.expiry_date = tokens.expiry_date
+				this.settings.refresh_token_expires_in = tokens.refresh_token_expires_in
+				this.settings.refresh_token_expiry = Date.now() + tokens.refresh_token_expires_in
+				await this.saveSettings()
+			}
+
+		}
 	}
 
 	startAutoSync() {
@@ -91,81 +275,106 @@ export default class SubstackGmailPlugin extends Plugin {
 	}
 
 	async refreshAccessToken(): Promise<boolean> {
-		if (!this.settings.refreshToken || !this.settings.clientId || !this.settings.clientSecret) {
-			new Notice('Missing OAuth credentials. Please configure in settings.');
+		if (!this.oAuth2Client) {
+			new Notice('OAuth client not initialized. Please configure credentials.');
 			return false;
 		}
 
 		try {
-			const response = await requestUrl({
-				url: 'https://oauth2.googleapis.com/token',
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/x-www-form-urlencoded',
-				},
-				body: new URLSearchParams({
-					grant_type: 'refresh_token',
-					refresh_token: this.settings.refreshToken,
-					client_id: this.settings.clientId,
-					client_secret: this.settings.clientSecret,
-				}).toString(),
-			});
-
-			if (response.status === 200) {
-				this.settings.accessToken = response.json.access_token;
+			const { credentials } = await this.oAuth2Client.refreshAccessToken();
+			if (credentials.access_token) {
+				this.settings.access_token = credentials.access_token;
 				await this.saveSettings();
 				return true;
 			}
 		} catch (error) {
 			console.error('Failed to refresh access token:', error);
-			new Notice('Failed to refresh Gmail access token');
+			try {
+				// XXX: testing
+				console.log(`Reinitizaling...`)
+				this.initializeGoogleAuth()
+				return true;
+			} catch {
+				console.error(`Failed to re-Initialize Google Auth`)
+
+				new Notice('Unable to authenticate access with Gmail.')
+			}
 		}
 		return false;
 	}
 
-	async makeGmailRequest(endpoint: string): Promise<any> {
-		if (!this.settings.accessToken) {
-			new Notice('No access token available. Please authenticate with Gmail.');
+	async listGmailMessages(params: any = {}): Promise<any> {
+		if (!this.gmail) {
+			new Notice('Gmail client not initialized. Please configure authentication.');
 			return null;
 		}
 
 		try {
-			const response = await requestUrl({
-				url: `https://gmail.googleapis.com/gmail/v1/${endpoint}`,
-				method: 'GET',
-				headers: {
-					'Authorization': `Bearer ${this.settings.accessToken}`,
-					'Content-Type': 'application/json',
-				},
+			const response = await this.gmail.users.messages.list({
+				userId: 'me',
+				...params
 			});
-
-			if (response.status === 401) {
+			return response.data;
+		} catch (error: any) {
+			const resp_err = error.response.data.error
+			if (resp_err === 'invalid_grant') {
 				// Token expired, try to refresh
 				if (await this.refreshAccessToken()) {
+					// XXX: testing
+					console.log(`Refreshing list success...`)
 					// Retry with new token
-					const retryResponse = await requestUrl({
-						url: `https://gmail.googleapis.com/gmail/v1/${endpoint}`,
-						method: 'GET',
-						headers: {
-							'Authorization': `Bearer ${this.settings.accessToken}`,
-							'Content-Type': 'application/json',
-						},
-					});
-					return retryResponse.json;
+					try {
+						const retryResponse = await this.gmail.users.messages.list({
+							userId: 'me',
+							...params
+						});
+						return retryResponse.data;
+					} catch (retryError) {
+						console.error('Retry failed:', retryError);
+						return null;
+					}
 				}
 				return null;
 			}
-
-			return response.json;
-		} catch (error) {
 			console.error('Gmail API request failed:', error);
 			new Notice('Failed to fetch emails from Gmail');
 			return null;
 		}
 	}
 
+	async getGmailMessage(messageId: string): Promise<any> {
+		if (!this.gmail) {
+			return null;
+		}
+
+		try {
+			const response = await this.gmail.users.messages.get({
+				userId: 'me',
+				id: messageId,
+				format: 'full'
+			});
+			return response.data;
+		} catch (error: any) {
+			if (error.code === 401 && await this.refreshAccessToken()) {
+				try {
+					const retryResponse = await this.gmail.users.messages.get({
+						userId: 'me',
+						id: messageId,
+						format: 'full'
+					});
+					return retryResponse.data;
+				} catch (retryError) {
+					console.error('Retry failed:', retryError);
+					return null;
+				}
+			}
+			console.error('Failed to get Gmail message:', error);
+			return null;
+		}
+	}
+
 	async syncNewsletters() {
-		if (!this.settings.accessToken) {
+		if (!this.settings.access_token) {
 			new Notice('Please configure Gmail authentication in settings first.');
 			return;
 		}
@@ -174,13 +383,16 @@ export default class SubstackGmailPlugin extends Plugin {
 
 		try {
 			// Search for Substack emails
-			const query = 'from:substack.com OR from:*.substack.com';
-			const messagesResponse = await this.makeGmailRequest(
-				`users/me/messages?q=${encodeURIComponent(query)}&maxResults=${this.settings.maxEmails}`
-			);
+			const query = 'from:substack.com AND -from:no-reply@substack.com AND -label:CATEGORY_PROMOTION AND -replyto:no-reply@substack.com';
+			const messagesResponse = await this.listGmailMessages({
+					q: query,
+					maxResults: this.settings.maxEmails
+				});
 
 			if (!messagesResponse || !messagesResponse.messages) {
 				new Notice('No Substack newsletters found');
+				// XXX: testing
+				console.log(`Message Respone from Gmail: ${JSON.stringify(messagesResponse)}`)
 				return;
 			}
 
@@ -199,7 +411,7 @@ export default class SubstackGmailPlugin extends Plugin {
 
 			for (const message of messagesResponse.messages) {
 				try {
-					const messageDetails = await this.makeGmailRequest(`users/me/messages/${message.id}`);
+					const messageDetails = await this.getGmailMessage(message.id);
 					if (messageDetails) {
 						const processed = await this.processMessage(messageDetails, existingFiles);
 						if (processed) processedCount++;
@@ -217,18 +429,27 @@ export default class SubstackGmailPlugin extends Plugin {
 	}
 
 	async processMessage(message: GmailMessage, existingFiles: Set<string>): Promise<boolean> {
+		// XXX: testing
+		// console.log(`message structure: ${JSON.stringify(message.payload.headers)}`)
 		const headers = message.payload.headers;
 		const subject = headers.find(h => h.name === 'Subject')?.value || 'Untitled';
 		const from = headers.find(h => h.name === 'From')?.value || 'Unknown';
 		const date = headers.find(h => h.name === 'Date')?.value;
+		const replyto = headers.find(h => h.name == 'Reply-To')?.value;
+
+		if (!replyto) {
+			return false
+		}
 
 		// Extract publication name from the From header
-		const publicationMatch = from.match(/^(.+?)\s*<.*@(.+?)\.substack\.com>/);
+		// XXX: currently doesn't work
+		const publicationMatch = from.match(/^(.+?)\s*<.*@substack\.com>/);
 		const publication = publicationMatch ? publicationMatch[1].trim() : 'Unknown Publication';
 
 		// Create a safe filename
 		const sanitizedSubject = subject.replace(/[<>:"/\\|?*]/g, '-').trim();
 		const filename = `${sanitizedSubject}`;
+
 
 		// Check if file already exists
 		if (existingFiles.has(filename)) {
@@ -271,10 +492,11 @@ export default class SubstackGmailPlugin extends Plugin {
 			content = this.decodeBase64(message.payload.body.data);
 		}
 
+		// XXX: testing
 		// Convert HTML to markdown-friendly text
-		if (content.includes('<html>') || content.includes('<div>')) {
-			content = this.htmlToMarkdown(content);
-		}
+		// if (content.includes('<html>') || content.includes('<div>')) {
+		content = convertHtmltoMarkdown(content);
+		// }
 
 		return content;
 	}
@@ -346,63 +568,64 @@ class SubstackGmailSettingTab extends PluginSettingTab {
 		containerEl.createEl('h2', { text: 'Substack Gmail Sync Settings' });
 
 		// Instructions
-		containerEl.createEl('p', {
-			text: 'To use this plugin, you need to set up Gmail API access. Follow these steps:'
-		});
+		// containerEl.createEl('p', {
+		// 	text: 'To use this plugin, you need to set up Gmail API access. Follow these steps:'
+		// });
 
-		const instructions = containerEl.createEl('ol');
-		instructions.createEl('li', { text: 'Go to the Google Cloud Console' });
-		instructions.createEl('li', { text: 'Create a new project or select an existing one' });
-		instructions.createEl('li', { text: 'Enable the Gmail API' });
-		instructions.createEl('li', { text: 'Create OAuth 2.0 credentials' });
-		instructions.createEl('li', { text: 'Use the authorization URL to get access and refresh tokens' });
+		// // XXX: might not need this since data all in credentials.json?
+		// const instructions = containerEl.createEl('ol');
+		// instructions.createEl('li', { text: 'Go to the Google Cloud Console' });
+		// instructions.createEl('li', { text: 'Create a new project or select an existing one' });
+		// instructions.createEl('li', { text: 'Enable the Gmail API' });
+		// instructions.createEl('li', { text: 'Create OAuth 2.0 credentials' });
+		// instructions.createEl('li', { text: 'Use the authorization URL to get access and refresh tokens' });
 
-		// Gmail API Settings
-		containerEl.createEl('h3', { text: 'Gmail API Configuration' });
+		// // Gmail API Settings
+		// containerEl.createEl('h3', { text: 'Gmail API Configuration' });
 
-		new Setting(containerEl)
-			.setName('Client ID')
-			.setDesc('OAuth 2.0 Client ID from Google Cloud Console')
-			.addText(text => text
-				.setPlaceholder('Enter your Client ID')
-				.setValue(this.plugin.settings.clientId)
-				.onChange(async (value) => {
-					this.plugin.settings.clientId = value;
-					await this.plugin.saveSettings();
-				}));
+		// new Setting(containerEl)
+		// 	.setName('Client ID')
+		// 	.setDesc('OAuth 2.0 Client ID from Google Cloud Console')
+		// 	.addText(text => text
+		// 		.setPlaceholder('Enter your Client ID')
+		// 		.setValue(this.plugin.settings.client_id)
+		// 		.onChange(async (value) => {
+		// 			this.plugin.settings.client_id = value;
+		// 			await this.plugin.saveSettings();
+		// 		}));
 
-		new Setting(containerEl)
-			.setName('Client Secret')
-			.setDesc('OAuth 2.0 Client Secret from Google Cloud Console')
-			.addText(text => text
-				.setPlaceholder('Enter your Client Secret')
-				.setValue(this.plugin.settings.clientSecret)
-				.onChange(async (value) => {
-					this.plugin.settings.clientSecret = value;
-					await this.plugin.saveSettings();
-				}));
+		// new Setting(containerEl)
+		// 	.setName('Client Secret')
+		// 	.setDesc('OAuth 2.0 Client Secret from Google Cloud Console')
+		// 	.addText(text => text
+		// 		.setPlaceholder('Enter your Client Secret')
+		// 		.setValue(this.plugin.settings.client_secret)
+		// 		.onChange(async (value) => {
+		// 			this.plugin.settings.client_secret = value;
+		// 			await this.plugin.saveSettings();
+		// 		}));
 
-		new Setting(containerEl)
-			.setName('Access Token')
-			.setDesc('OAuth 2.0 Access Token')
-			.addText(text => text
-				.setPlaceholder('Enter your Access Token')
-				.setValue(this.plugin.settings.accessToken)
-				.onChange(async (value) => {
-					this.plugin.settings.accessToken = value;
-					await this.plugin.saveSettings();
-				}));
+		// new Setting(containerEl)
+		// 	.setName('Access Token')
+		// 	.setDesc('OAuth 2.0 Access Token')
+		// 	.addText(text => text
+		// 		.setPlaceholder('Enter your Access Token')
+		// 		.setValue(this.plugin.settings.access_token)
+		// 		.onChange(async (value) => {
+		// 			this.plugin.settings.access_token = value;
+		// 			await this.plugin.saveSettings();
+		// 		}));
 
-		new Setting(containerEl)
-			.setName('Refresh Token')
-			.setDesc('OAuth 2.0 Refresh Token')
-			.addText(text => text
-				.setPlaceholder('Enter your Refresh Token')
-				.setValue(this.plugin.settings.refreshToken)
-				.onChange(async (value) => {
-					this.plugin.settings.refreshToken = value;
-					await this.plugin.saveSettings();
-				}));
+		// new Setting(containerEl)
+		// 	.setName('Refresh Token')
+		// 	.setDesc('OAuth 2.0 Refresh Token')
+		// 	.addText(text => text
+		// 		.setPlaceholder('Enter your Refresh Token')
+		// 		.setValue(this.plugin.settings.refreshToken)
+		// 		.onChange(async (value) => {
+		// 			this.plugin.settings.refreshToken = value;
+		// 			await this.plugin.saveSettings();
+		// 		}));
 
 		// Sync Settings
 		containerEl.createEl('h3', { text: 'Sync Configuration' });
@@ -455,16 +678,16 @@ class SubstackGmailSettingTab extends PluginSettingTab {
 				}));
 
 		// OAuth Helper
-		containerEl.createEl('h3', { text: 'OAuth Helper' });
-		containerEl.createEl('p', {
-			text: 'Use this URL for OAuth authorization (replace YOUR_CLIENT_ID):'
-		});
+		// containerEl.createEl('h3', { text: 'OAuth Helper' });
+		// containerEl.createEl('p', {
+		// 	text: 'Use this URL for OAuth authorization (replace YOUR_CLIENT_ID):'
+		// });
 
-		const authUrl = `https://accounts.google.com/o/oauth2/auth?client_id=YOUR_CLIENT_ID&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=https://www.googleapis.com/auth/gmail.readonly&response_type=code&access_type=offline`;
+		// const authUrl = `https://accounts.google.com/o/oauth2/auth?client_id=YOUR_CLIENT_ID&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=https://www.googleapis.com/auth/gmail.readonly&response_type=code&access_type=offline`;
 		
-		containerEl.createEl('code', {
-			text: authUrl,
-			attr: { style: 'word-break: break-all; font-size: 12px;' }
-		});
+		// containerEl.createEl('code', {
+		// 	text: authUrl,
+		// 	attr: { style: 'word-break: break-all; font-size: 12px;' }
+		// });
 	}
 }

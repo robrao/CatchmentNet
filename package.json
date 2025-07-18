@@ -17,6 +17,10 @@
 	],
 	"author": "Robby Rao",
 	"license": "MIT",
+	"dependencies": {
+		"googleapis": "^140.0.1",
+		"google-auth-library": "^9.0.0"
+	},
 	"devDependencies": {
 		"@types/node": "^16.11.6",
 		"@typescript-eslint/eslint-plugin": "5.29.0",
