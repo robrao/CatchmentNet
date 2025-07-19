@@ -3,19 +3,6 @@ function htmlToMarkdown(htmlContent) {
     const parser = new DOMParser();
     const doc = parser.parseFromString(htmlContent, 'text/html');
     
-    // Remove unwanted elements (but preserve "read in app" links)
-    const unwantedSelectors = [
-        'style', 'script', 'img[src*="tracking"]', 'img[width="1"]',
-        '.email-body-container', '.preview', '.footer',
-        'table[role="presentation"]', '.share-button-container',
-        '.email-ufi-2-top', '.email-ufi-2-bottom', '.postscript',
-        'a[href*="unsubscribe"]'
-    ];
-
-    unwantedSelectors.forEach(selector => {
-        doc.querySelectorAll(selector).forEach(el => el.remove());
-    });
-
     let markdown = '';
     
     // Extract title
@@ -166,9 +153,9 @@ function processInlineElements(element) {
     
     // Process child nodes to handle inline formatting
     for (const node of element.childNodes) {
-        if (node.nodeType === 3) { // TEXT_NODE
+        if (node.nodeType === Node.TEXT_NODE) {
             text += node.textContent;
-        } else if (node.nodeType === 1) { // ELEMENT_NODE
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
             const tagName = node.tagName.toLowerCase();
             
             switch (tagName) {
@@ -247,7 +234,6 @@ function cleanMarkdown(markdown) {
         .trim();
 }
 
-// Example usage function
 export function convertHtmltoMarkdown(htmlContent: string): string {
     const markdown = htmlToMarkdown(htmlContent);
     const cleanedMarkdown = cleanMarkdown(markdown);
