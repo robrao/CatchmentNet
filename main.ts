@@ -1,11 +1,11 @@
 // main.ts
-import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, TFolder } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, TFolder, Menu } from 'obsidian';
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import { assertPresent } from 'typeHelpers';
 import { convertHtmltoMarkdown } from 'markdownHelper';
+import { NoteModal } from 'noteModal';
 
-// import * as open from 'open';
 import * as http from 'http';
 import * as url from 'url';
 
@@ -16,7 +16,7 @@ interface SubstackGmailSettings {
 	client_id: string;
 	client_secret: string;
 	access_token: string;
-	substackFolder: string;
+	catchementFolder: string;
 	maxEmails: number;
 	syncFrequency: number; // in minutes
 	scopes: Array<string>;
@@ -26,6 +26,7 @@ interface SubstackGmailSettings {
 	refresh_token_expires_in: number;
 	expiry_date: number;
 	refresh_token_expiry: number;
+	last_refreshed_date: number;
 }
 
 interface GmailTokens {
@@ -40,7 +41,7 @@ const DEFAULT_SETTINGS: SubstackGmailSettings = {
 	client_id: '',
 	client_secret: '',
 	access_token: '',
-	substackFolder: 'Catchment',
+	catchementFolder: 'Catchment',
 	maxEmails: 50,
 	syncFrequency: 60,
 	scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
@@ -49,7 +50,8 @@ const DEFAULT_SETTINGS: SubstackGmailSettings = {
 	token_type: '',
 	refresh_token_expires_in: 0,
 	expiry_date: 0,
-	refresh_token_expiry: 0
+	refresh_token_expiry: 0,
+	last_refreshed_date: 0
 };
 
 interface GmailMessage {
@@ -95,7 +97,43 @@ export default class SubstackGmailPlugin extends Plugin {
 		if (this.settings.syncFrequency > 0) {
 			this.startAutoSync();
 		}
+
+		// Add context menu item for note extraction
+        this.registerEvent(
+            this.app.workspace.on('editor-menu', (menu, editor, view) => {
+                const selection = editor.getSelection();
+                if (selection && selection.trim().length > 0) {
+                    menu.addItem((item) => {
+                        item
+                            .setTitle('Take Note')
+                            .setIcon('quote-glyph')
+                            .onClick(() => {
+                                this.createNote(editor, view)
+                            });
+                    });
+                }
+            })
+        );
+
 	}
+
+	createNote(editor: any, view: any) {
+        const selectedText = editor.getSelection();
+        
+        if (!selectedText || selectedText.trim().length === 0) {
+            new Notice('Please select some text to extract');
+            return;
+        }
+
+        if (!view.file) {
+            new Notice('No active file found');
+            return;
+        }
+
+        // Open the extraction modal
+        const modal = new NoteModal(this.app, this, selectedText.trim(), view.file, this.settings.catchementFolder);
+        modal.open();
+    }
 
 	onunload() {
 		if (this.syncInterval) {
@@ -133,6 +171,8 @@ export default class SubstackGmailPlugin extends Plugin {
 				server_.close()
 			}
 
+			let browserWindow: Window | null = null;
+
 			server_ = http.createServer(async (req, res) => {
 				try {
 					// XXX: testing
@@ -140,26 +180,6 @@ export default class SubstackGmailPlugin extends Plugin {
 					if (req.url && req.url.indexOf('/oauth2callback') > -1) {
 						const qs = new url.URL(req.url, this.settings.redirect_uris[0]).searchParams
 						
-						// Send HTML with auto-close script
-						// XXX: the script does not auto close the window
-            			res.writeHead(200, { 'Content-Type': 'text/html' });
-            			res.end(`
-            			    <html>
-            			        <head><title>Authorization Complete</title></head>
-            			        <body>
-            			            <h2>Authorization succeeded!</h2>
-            			            <p>This window will close automatically...</p>
-            			            <script>
-            			                setTimeout(() => {
-            			                    window.close();
-            			                }, 2000); // Close after 2 seconds
-            			            </script>
-            			        </body>
-            			    </html>
-            			`);
-
-						// res.end("Authorization succeeded. You can close this window.")
-						// XXX: testing
 						console.log(`Closing Server...`)
 						server_.close()
 						
@@ -167,6 +187,14 @@ export default class SubstackGmailPlugin extends Plugin {
 						assertPresent(code, "Could not get token code.")
 						const { tokens } = await this.oAuth2Client.getToken(code)
 						this.oAuth2Client.setCredentials(tokens)
+
+						if (browserWindow && !browserWindow.closed) {
+							browserWindow.close()
+							browserWindow = null;
+
+							// XXX: testing detach
+							console.log(`Window should close...`)
+						}
 						
 						resolve(tokens as any)
 					} 
@@ -178,7 +206,7 @@ export default class SubstackGmailPlugin extends Plugin {
 			})
 
 			server_.listen(LISTEN_PORT, () => {
-				window.open(authUrl)
+				window.open(authUrl, '_blank')
 			})
 		})
 	}
@@ -187,17 +215,18 @@ export default class SubstackGmailPlugin extends Plugin {
 		const currentDate = Date.now()
 		const expiryDate = this.settings.refresh_token_expiry
 		const notExpired = expiryDate > currentDate
-		const isInitialized = this.oAuth2Client?.credentials?.refresh_token
+		const isInitialized = typeof this.oAuth2Client?.credentials?.refresh_token === "string"
 		// XXX: testing
 		console.log(`Initialize Auth...${isInitialized} && ${notExpired}`)
 		if (isInitialized && notExpired) {
 			// XXX: testing
-			console.log(`oAuth2Client already initialized...${JSON.stringify(this.oAuth2Client)}`)
-			console.log(`Expired: ${notExpired}`)
+			console.log(`oAuth2Client already initialized...${isInitialized}`)
+			console.log(`notExpired: ${notExpired}`)
 			console.log(`Expiry date: ${this.oAuth2Client?.credentials.expiry_date}`)
 			console.log(`Current Date: ${currentDate}`)
 			console.log(`Refresh Expires: ${this.settings.refresh_token_expires_in}`)
-			return
+			console.log(`Last refreshed date: ${this.settings.last_refreshed_date}`)
+			return true
 		}
 
 		// XXX: testing
@@ -210,18 +239,23 @@ export default class SubstackGmailPlugin extends Plugin {
 			console.log(`Loading Data...`)
 			try {
 				const credentials = await this.loadData()
-				const { client_secret, client_id, redirect_uris, access_token } = credentials.installed
+				const { client_secret, client_id, redirect_uris, access_token, refresh_token, refresh_token_expiry, expiryDate } = credentials.installed
 				this.settings.client_id = client_id
 				this.settings.client_secret = client_secret
 				this.settings.redirect_uris = redirect_uris
 				this.settings.access_token = access_token
+				this.settings.refresh_token = refresh_token
+				this.settings.refresh_token_expiry = refresh_token_expiry
+				this.settings.expiry_date = expiryDate
 			} catch (error) {
 				console.error('Failed to retreive credentials:', error);
-				new Notice('Failed to retreieve credentials');
+				new Notice('Failed to retreieve credentials')
+
+				return false
 			}
 		}
 
-		if (this.settings.client_id && this.settings.client_secret) {
+		if (this.settings.client_id && this.settings.client_secret && !this.oAuth2Client) {
 			// XXX: testing
 			console.log(`Add ID and Secret and URIs to oAuth`)
 			try {
@@ -232,34 +266,38 @@ export default class SubstackGmailPlugin extends Plugin {
 				)
 			} catch (error) {
 				console.error('Failed to initialize Google Authorization:', error);
-				new Notice('Failed to intialize Google Authorization');
+				new Notice('Failed to intialize Google Authorization')
+
+				return false
 			}
-
-			if (this.settings.access_token && this.settings.refresh_token && notExpired) {
-				this.oAuth2Client.setCredentials({
-					access_token: this.settings.access_token,
-					refresh_token: this.settings.refresh_token,
-					expiry_date: this.settings.expiry_date,
-				});
-
-				this.gmail = google.gmail({ version: 'v1', auth: this.oAuth2Client });
-				// XXX: testing
-				console.log(`Gmail Client Intialized...`)
-			} else {
-				// XXX: testing
-				console.log('Getting new token for initiGoogleAuth...')
-				const tokens = await this.getNewTokens()
-				// XXX: testing
-				console.log(`Got token: ${JSON.stringify(tokens)}`)
-				this.settings.access_token = tokens.access_token
-				this.settings.refresh_token = tokens.refresh_token
-				this.settings.expiry_date = tokens.expiry_date
-				this.settings.refresh_token_expires_in = tokens.refresh_token_expires_in
-				this.settings.refresh_token_expiry = Date.now() + tokens.refresh_token_expires_in
-				await this.saveSettings()
-			}
-
 		}
+
+		if (!this.settings.access_token || !this.settings.refresh_token || !notExpired) {
+			// XXX: testing
+			console.log('Getting new token for initiGoogleAuth...')
+			const tokens = await this.getNewTokens()
+			// XXX: testing
+			console.log(`Got token: ${JSON.stringify(tokens)}`)
+			this.settings.access_token = tokens.access_token
+			this.settings.refresh_token = tokens.refresh_token
+			this.settings.expiry_date = tokens.expiry_date
+			this.settings.refresh_token_expires_in = tokens.refresh_token_expires_in * 1000 // NOTE: in seconds convert to milliseconds
+			this.settings.last_refreshed_date = Date.now()
+			this.settings.refresh_token_expiry = this.settings.last_refreshed_date + this.settings.refresh_token_expires_in
+			await this.saveSettings()
+		}
+
+		this.oAuth2Client.setCredentials({
+			access_token: this.settings.access_token,
+			refresh_token: this.settings.refresh_token,
+			expiry_date: this.settings.expiry_date,
+		});
+
+		this.gmail = google.gmail({ version: 'v1', auth: this.oAuth2Client });
+		// XXX: testing
+		console.log(`Gmail Client Intialized...`)
+
+		return true
 	}
 
 	startAutoSync() {
@@ -275,13 +313,17 @@ export default class SubstackGmailPlugin extends Plugin {
 	}
 
 	async refreshAccessToken(): Promise<boolean> {
+		// XXX: DEBUG
+		console.log(`Refreshing Token...`)
 		if (!this.oAuth2Client) {
-			new Notice('OAuth client not initialized. Please configure credentials.');
+			new Notice('Refresh failed: OAuth client not initialized. Please configure credentials.');
 			return false;
 		}
 
 		try {
 			const { credentials } = await this.oAuth2Client.refreshAccessToken();
+			// XXX: DEBUG
+			console.log(`DEBUG Credentials refreshed: ${JSON.stringify(credentials)}`)
 			if (credentials.access_token) {
 				this.settings.access_token = credentials.access_token;
 				await this.saveSettings();
@@ -305,8 +347,8 @@ export default class SubstackGmailPlugin extends Plugin {
 
 	async listGmailMessages(params: any = {}): Promise<any> {
 		if (!this.gmail) {
-			new Notice('Gmail client not initialized. Please configure authentication.');
-			return null;
+			console.log(`listGmailMessages Initializing Gmail`)
+			await this.initializeGoogleAuth()
 		}
 
 		try {
@@ -392,7 +434,7 @@ export default class SubstackGmailPlugin extends Plugin {
 			if (!messagesResponse || !messagesResponse.messages) {
 				new Notice('No Substack newsletters found');
 				// XXX: testing
-				console.log(`Message Respone from Gmail: ${JSON.stringify(messagesResponse)}`)
+				console.log(`Message Response from Gmail: ${JSON.stringify(messagesResponse)}`)
 				return;
 			}
 
@@ -400,7 +442,7 @@ export default class SubstackGmailPlugin extends Plugin {
 			const existingFiles = new Set<string>();
 
 			// Get existing files in the Substack folder
-			const folder = this.app.vault.getAbstractFileByPath(this.settings.substackFolder);
+			const folder = this.app.vault.getAbstractFileByPath(this.settings.catchementFolder);
 			if (folder && folder instanceof TFolder) {
 				folder.children.forEach((file) => {
 					if (file instanceof TFile) {
@@ -429,8 +471,6 @@ export default class SubstackGmailPlugin extends Plugin {
 	}
 
 	async processMessage(message: GmailMessage, existingFiles: Set<string>): Promise<boolean> {
-		// XXX: testing
-		// console.log(`message structure: ${JSON.stringify(message.payload.headers)}`)
 		const headers = message.payload.headers;
 		const subject = headers.find(h => h.name === 'Subject')?.value || 'Untitled';
 		const from = headers.find(h => h.name === 'From')?.value || 'Unknown';
@@ -442,7 +482,6 @@ export default class SubstackGmailPlugin extends Plugin {
 		}
 
 		// Extract publication name from the From header
-		// XXX: currently doesn't work
 		const publicationMatch = from.match(/^(.+?)\s*<.*@substack\.com>/);
 		const publication = publicationMatch ? publicationMatch[1].trim() : 'Unknown Publication';
 
@@ -466,10 +505,10 @@ export default class SubstackGmailPlugin extends Plugin {
 		const markdownContent = this.createMarkdownContent(subject, publication, from, date, content);
 
 		// Ensure folder exists
-		await this.ensureFolderExists(this.settings.substackFolder);
+		await this.ensureFolderExists(this.settings.catchementFolder);
 
 		// Create the file
-		const filePath = `${this.settings.substackFolder}/${filename}.md`;
+		const filePath = `${this.settings.catchementFolder}/${filename}.md`;
 		await this.app.vault.create(filePath, markdownContent);
 
 		return true;
@@ -492,11 +531,7 @@ export default class SubstackGmailPlugin extends Plugin {
 			content = this.decodeBase64(message.payload.body.data);
 		}
 
-		// XXX: testing
-		// Convert HTML to markdown-friendly text
-		// if (content.includes('<html>') || content.includes('<div>')) {
 		content = convertHtmltoMarkdown(content);
-		// }
 
 		return content;
 	}
@@ -635,9 +670,9 @@ class SubstackGmailSettingTab extends PluginSettingTab {
 			.setDesc('Folder where newsletters will be saved')
 			.addText(text => text
 				.setPlaceholder('Substack Newsletters')
-				.setValue(this.plugin.settings.substackFolder)
+				.setValue(this.plugin.settings.catchementFolder)
 				.onChange(async (value) => {
-					this.plugin.settings.substackFolder = value;
+					this.plugin.settings.catchementFolder = value;
 					await this.plugin.saveSettings();
 				}));
 
@@ -645,6 +680,7 @@ class SubstackGmailSettingTab extends PluginSettingTab {
 			.setName('Max Emails')
 			.setDesc('Maximum number of emails to fetch per sync')
 			.addSlider(slider => slider
+				// XXX: testing
 				.setLimits(10, 200, 10)
 				.setValue(this.plugin.settings.maxEmails)
 				.setDynamicTooltip()

@@ -1,7 +1,21 @@
-function htmlToMarkdown(htmlContent) {
-    // Create a temporary DOM element to parse HTML
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(htmlContent, 'text/html');
+function htmlToMarkdown(htmlContent: string): string {
+
+    // TODO: test below
+    // Pre-clean the HTML to reduce memory usage
+    // const cleanedHtml = htmlContent
+    //     // Remove large style blocks and scripts that aren't needed
+    //     .replace(/<style[\s\S]*?<\/style>/gi, '')
+    //     .replace(/<script[\s\S]*?<\/script>/gi, '')
+    //     // Remove tracking images and tiny images early
+    //     .replace(/<img[^>]*(?:width="1"|height="1")[^>]*>/gi, '')
+    //     .replace(/<img[^>]*src="[^"]*(?:tracking|pixel|beacon)[^"]*"[^>]*>/gi, '')
+    //     .replace(/&#8212;/g, '')
+    //     // Remove excessive whitespace
+    //     .replace(/\s+/g, ' ')
+    //     .trim();
+
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(htmlContent, 'text/html')
     
     let markdown = '';
     
@@ -68,20 +82,39 @@ function htmlToMarkdown(htmlContent) {
         contentContainer = doc.body;
     }
     
-    // Extract content preserving document order
+    // Extract content preserving document order and avoiding duplicates
     markdown += extractContentInOrder(contentContainer);
     
     return markdown.trim();
 }
 
-function extractContentInOrder(container) {
+function extractContentInOrder(container: Element): string {
     let content = '';
     
-    // Get all relevant content elements in document order
-    const contentElements = container.querySelectorAll('h2, h3, h4, h5, h6, p, blockquote, hr, ul, ol, .footnote');
+    // Get all relevant content elements in document order (including images)
+        // Get all relevant content elements in document order (including images)
+    const allElements = container.querySelectorAll('h2, h3, h4, h5, h6, p, blockquote, hr, ul, ol, .footnote, img, figure, .captioned-image-container');
+    
+    // Filter out elements that are descendants of other elements we're processing
+    const topLevelElements = Array.from(allElements).filter((element: Element) => {
+        // Check if this element is contained within another element in our list
+        return !Array.from(allElements).some(otherElement => 
+            otherElement !== element && 
+            element instanceof Element &&
+            otherElement instanceof Element &&
+            otherElement.contains(element) &&
+            // Only exclude if the parent is a block-level element that processes its own content
+            (otherElement.tagName.toLowerCase() === 'blockquote' ||
+             otherElement.tagName.toLowerCase() === 'ul' ||
+             otherElement.tagName.toLowerCase() === 'ol' ||
+             otherElement.classList.contains('footnote') ||
+             otherElement.tagName.toLowerCase() === 'figure' ||
+             otherElement.classList.contains('captioned-image-container'))
+        );
+    });
     
     // Process elements in the order they appear in the document
-    contentElements.forEach(element => {
+    topLevelElements.forEach(element => {
         const tagName = element.tagName.toLowerCase();
         
         switch (tagName) {
@@ -98,12 +131,14 @@ function extractContentInOrder(container) {
                 break;
                 
             case 'p':
-                // Skip paragraphs that are inside blockquotes (they'll be processed with the blockquote)
-                if (!element.closest('blockquote')) {
-                    const paragraphText = processInlineElements(element);
-                    if (paragraphText.trim()) {
-                        content += `${paragraphText.trim()}\n\n`;
-                    }
+                // Skip paragraphs that are inside blockquotes OR footnotes
+                if (element.closest('blockquote') || element.closest('.footnote')) {
+                    return;
+                }
+                
+                const paragraphText = processInlineElementsSimple(element);
+                if (paragraphText.trim()) {
+                    content += `${paragraphText.trim()}\n\n`;
                 }
                 break;
                 
@@ -124,7 +159,7 @@ function extractContentInOrder(container) {
             case 'ol':
                 const items = element.querySelectorAll('li');
                 items.forEach((li, index) => {
-                    const itemText = processInlineElements(li);
+                    const itemText = processInlineElementsSimple(li);
                     const prefix = tagName === 'ul' ? '-' : `${index + 1}.`;
                     if (itemText.trim()) {
                         content += `${prefix} ${itemText.trim()}\n`;
@@ -132,87 +167,240 @@ function extractContentInOrder(container) {
                 });
                 content += '\n';
                 break;
-        }
-    });
-    
-    // Handle footnotes separately (they usually appear at the end)
-    const footnotes = container.querySelectorAll('.footnote');
-    footnotes.forEach(footnote => {
-        const footnoteNum = footnote.querySelector('.footnote-number')?.textContent;
-        const footnoteContent = footnote.querySelector('.footnote-content')?.textContent;
-        if (footnoteNum && footnoteContent) {
-            content += `[^${footnoteNum}]: ${footnoteContent.trim()}\n\n`;
+                
+            case 'img':
+                // Handle standalone images
+                if (!element.closest('figure') && !element.closest('.captioned-image-container')) {
+                    const imageMarkdown = processImage(element);
+                    if (imageMarkdown) {
+                        content += `${imageMarkdown}\n\n`;
+                    }
+                }
+                break;
+                
+            case 'figure':
+                // Handle figure elements (which may contain images and captions)
+                const figureMarkdown = processFigure(element);
+                if (figureMarkdown) {
+                    content += `${figureMarkdown}\n\n`;
+                }
+                break;
+                
+            case 'div':
+                // Handle footnotes when we encounter them in document order
+                if (element instanceof Element && element.classList.contains('footnote')) {
+                    const footnoteNum = element.querySelector('.footnote-number')?.textContent;
+                    const footnoteContent = element.querySelector('.footnote-content')?.textContent;
+                    if (footnoteNum && footnoteContent) {
+                        content += `[^${footnoteNum}]: ${footnoteContent.trim()}\n\n`;
+                    }
+                }
+                // Handle captioned image containers
+                else if (element instanceof Element && element.classList.contains('captioned-image-container')) {
+                    const imageMarkdown = processCaptionedImageContainer(element);
+                    if (imageMarkdown) {
+                        content += `${imageMarkdown}\n\n`;
+                    }
+                }
+                break;
         }
     });
     
     return content;
 }
 
-function processInlineElements(element) {
+function processImage(img) {
+    const src = img.getAttribute('src');
+    const alt = img.getAttribute('alt') || '';
+    const title = img.getAttribute('title') || '';
+    
+    // Skip tracking images and tiny images
+    if (!src || 
+        src.includes('tracking') || 
+        img.getAttribute('width') === '1' || 
+        img.getAttribute('height') === '1') {
+        return '';
+    }
+    
+    // Create markdown image syntax
+    let imageMarkdown = `![${alt}](${src})`;
+    
+    // Add title if present
+    if (title) {
+        imageMarkdown = `![${alt}](${src} "${title}")`;
+    }
+    
+    return imageMarkdown;
+}
+
+function processFigure(figure) {
+    // Look for image within the figure
+    const img = figure.querySelector('img');
+    if (!img) return '';
+    
+    const imageMarkdown = processImage(img);
+    if (!imageMarkdown) return '';
+    
+    // Look for caption
+    const caption = figure.querySelector('figcaption, .image-caption, .caption');
+    
+    if (caption) {
+        const captionText = caption.textContent.trim();
+        // Return image with caption as italic text below
+        return `${imageMarkdown}\n*${captionText}*`;
+    }
+    
+    return imageMarkdown;
+}
+
+function processCaptionedImageContainer(container) {
+    // Look for image within the container
+    const img = container.querySelector('img');
+    if (!img) return '';
+    
+    const imageMarkdown = processImage(img);
+    if (!imageMarkdown) return '';
+    
+    // Look for caption in various possible locations
+    const caption = container.querySelector('.image-caption, .caption, figcaption, .subtitle') ||
+                   container.nextElementSibling?.classList.contains('caption') ? container.nextElementSibling : null;
+    
+    if (caption) {
+        const captionText = caption.textContent.trim();
+        // Return image with caption as italic text below
+        return `${imageMarkdown}\n*${captionText}*`;
+    }
+    
+    return imageMarkdown;
+}
+
+function handleEmphasisFormatting(content: string, marker: string): string {
+    // First, handle leading whitespace
+    const leadingWhitespace = content.match(/^\s*/)[0];
+    let remaining = content.slice(leadingWhitespace.length);
+    
+    // Handle trailing whitespace and punctuation (including em dash, en dash, etc.)
+    const trailingMatch = remaining.match(/^(.+?)(\s+|[.,!?;:\-—–]+\s*|\s*[.,!?;:\-—–]+|\s+[.,!?;:\-—–]+\s*)$/);
+    
+    let coreContent = remaining;
+    let trailingContent = '';
+    
+    if (trailingMatch) {
+        coreContent = trailingMatch[1];
+        trailingContent = trailingMatch[2];
+    }
+    
+    // Trim the core content
+    coreContent = coreContent.trim();
+    
+    // If core content is empty or just punctuation/dashes, don't emphasize
+    if (!coreContent || /^[.,!?;:\-—–\s]*$/.test(coreContent)) {
+        return content; // Return original content without emphasis
+    }
+    
+    // Return properly formatted emphasis
+    return leadingWhitespace + marker + coreContent + marker + trailingContent;
+}
+
+function processInlineElementsSimple(element) {
     let text = '';
     
-    // Process child nodes to handle inline formatting
-    for (const node of element.childNodes) {
-        if (node.nodeType === Node.TEXT_NODE) {
-            text += node.textContent;
-        } else if (node.nodeType === Node.ELEMENT_NODE) {
+    // Simple recursive approach
+    function processNode(node) {
+        if (node.nodeType === 3) { // TEXT_NODE
+            return node.textContent;
+        } else if (node.nodeType === 1) { // ELEMENT_NODE
             const tagName = node.tagName.toLowerCase();
+            let result = '';
             
             switch (tagName) {
                 case 'strong':
                 case 'b':
-                    // Recursively process content inside strong tags to preserve nested links
-                    const strongContent = processInlineElements(node);
-                    text += `**${strongContent}**`;
-                    break;
+                    // Process children recursively
+                    for (const child of node.childNodes) {
+                        result += processNode(child);
+                    }
+                    return `**${result}**`;
+
                 case 'em':
                 case 'i':
-                    // Recursively process content inside em tags to preserve nested links
-                    const emContent = processInlineElements(node);
-                    text += `*${emContent}*`;
-                    break;
+                    // Process children recursively
+                    for (const child of node.childNodes) {
+                        result += processNode(child);
+                    }
+
+                    // If content is only whitespace, return it as-is (don't emphasize spaces)
+                    if (/^\s*$/.test(result)) {
+                        return result;
+                    }
+
+                    // Don't wrap empty content after trimming
+                    if (!result.trim()) {
+                        return '';
+                    }
+
+                    // Handle punctuation and spacing issues
+                    result = handleEmphasisFormatting(result, '*');
+                    return result;
+
                 case 'code':
-                    text += `\`${node.textContent}\``;
-                    break;
+                    return `\`${node.textContent}\``;
+                    
+                case 'img':
+                    // Handle inline images
+                    const inlineImageMarkdown = processImage(node);
+                    return inlineImageMarkdown || '';
+                    
                 case 'a':
                     const href = node.getAttribute('href');
                     const linkText = node.textContent;
                     if (href && !href.includes('unsubscribe')) {
-                        // More specific filtering: only filter out internal app functionality
-                        // Preserve all redirect URLs and external links
+                        // Filter out internal app actions only
                         const isInternalAppAction = href.includes('substack.com/app-link') && 
                                                    !href.includes('redirect=app-store') &&
                                                    (href.includes('action=like') || 
                                                     href.includes('action=share') || 
                                                     href.includes('action=comment') ||
                                                     href.includes('submitLike=true'));
-        
+                        
                         if (isInternalAppAction) {
-                            text += linkText; // Just text, no link
+                            return linkText; // Just text, no link
                         } else {
-                            text += `[${linkText}](${href})`; // Preserve the link
+                            return `[${linkText}](${href})`; // Preserve the link
                         }
                     } else {
-                        text += linkText;
+                        return linkText;
                     }
-                    break;
+                    
                 case 'span':
                     // Handle footnote anchors
                     if (node.classList && node.classList.contains('footnote-anchor-email')) {
-                        text += `[^${node.textContent}]`;
+                        return `[^${node.textContent}]`;
                     } else {
-                        // Recursively process spans in case they contain nested formatting
-                        text += processInlineElements(node);
+                        // Process children recursively
+                        for (const child of node.childNodes) {
+                            result += processNode(child);
+                        }
+                        return result;
                     }
-                    break;
+                    
                 case 'br':
-                    text += '\n';
-                    break;
+                    return '\n';
+                    
                 default:
-                    // For any other nested elements, recursively process to preserve formatting
-                    text += processInlineElements(node);
+                    // Process children recursively for any other element
+                    for (const child of node.childNodes) {
+                        result += processNode(child);
+                    }
+                    return result;
             }
         }
+        return '';
+    }
+    
+    // Process all child nodes
+    for (const child of element.childNodes) {
+        text += processNode(child);
     }
     
     return text;
@@ -237,6 +425,6 @@ function cleanMarkdown(markdown) {
 export function convertHtmltoMarkdown(htmlContent: string): string {
     const markdown = htmlToMarkdown(htmlContent);
     const cleanedMarkdown = cleanMarkdown(markdown);
-
+    
     return cleanedMarkdown;
 }

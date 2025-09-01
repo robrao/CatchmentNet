@@ -51,4 +51,5 @@ coverage/
 # Temporary folders
 tmp/
 temp/
+util/
 
