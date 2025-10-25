@@ -5,14 +5,24 @@ import { OAuth2Client } from 'google-auth-library';
 import { assertPresent } from 'typeHelpers';
 import { convertHtmltoMarkdown } from 'markdownHelper';
 import { NoteModal } from 'noteModal';
+import { NostrNIP23Client } from './nostr';
 
 import * as http from 'http';
 import * as url from 'url';
 
-
 let server_ = http.createServer()
 
-interface SubstackGmailSettings {
+export interface NostrAuthor {
+	pubkey?: string;
+	npub: string;
+	created_at?: string;
+	name?: string;
+	display_name?: string;
+	username?: string;
+	lastUpdated?: number;
+}
+
+interface CatchementSettings {
 	client_id: string;
 	client_secret: string;
 	access_token: string;
@@ -27,6 +37,13 @@ interface SubstackGmailSettings {
 	expiry_date: number;
 	refresh_token_expiry: number;
 	last_refreshed_date: number;
+	// Nostr settings
+	nostrEnabled: boolean;
+	nostrRelays: Array<string>;
+	nostrFollowedAuthors: Array<NostrAuthor>;
+	nostrSyncFrequency: number; // in minutes
+	nostrLastSyncTime?: number; // Unix timestamp in seconds
+	maxNostrQuery: number;
 }
 
 interface GmailTokens {
@@ -37,13 +54,13 @@ interface GmailTokens {
 	expiry_date: number;
 }
 
-const DEFAULT_SETTINGS: SubstackGmailSettings = {
+const DEFAULT_SETTINGS: CatchementSettings = {
 	client_id: '',
 	client_secret: '',
 	access_token: '',
 	catchementFolder: 'Catchment',
 	maxEmails: 50,
-	syncFrequency: 60,
+	syncFrequency: 0,
 	scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
 	redirect_uris: [],
 	refresh_token: '',
@@ -51,7 +68,18 @@ const DEFAULT_SETTINGS: SubstackGmailSettings = {
 	refresh_token_expires_in: 0,
 	expiry_date: 0,
 	refresh_token_expiry: 0,
-	last_refreshed_date: 0
+	last_refreshed_date: 0,
+	// Nostr defaults
+	nostrEnabled: false,
+	nostrRelays: [
+		'wss://relay.damus.io',
+		'wss://nos.lol',
+		'wss://relay.snort.social',
+		'wss://relay.nostr.band'
+	],
+	nostrFollowedAuthors: [],
+	nostrSyncFrequency: 30,
+	maxNostrQuery: 50
 };
 
 interface GmailMessage {
@@ -66,22 +94,29 @@ interface GmailMessage {
 	labelIds: Array<string>;
 }
 
-export default class SubstackGmailPlugin extends Plugin {
-	settings: SubstackGmailSettings;
+export default class CatchementPlugin extends Plugin {
+	settings: CatchementSettings;
 	syncInterval: number | null = null;
+	nostrSyncInterval: number | null = null;
 	oAuth2Client: OAuth2Client | null = null;
 	gmail: any = null;
+	nostrClient: NostrNIP23Client | null = null;
 
 	async onload() {
 		await this.loadSettings();
 		this.initializeGoogleAuth();
 
-		// Add ribbon icon
-		this.addRibbonIcon('mail', 'Sync Substack Newsletters', (evt: MouseEvent) => {
+		if (this.settings.nostrEnabled) {
+			this.initializeNostr();
+		}
+
+		// Add ribbon icon for Nostr sync
+		this.addRibbonIcon('globe', 'Sync Articles', (evt: MouseEvent) => {
+			this.syncNostrArticles();
 			this.syncNewsletters();
 		});
 
-		// Add command
+		// Add commands
 		this.addCommand({
 			id: 'sync-substack-newsletters',
 			name: 'Sync Substack newsletters from Gmail',
@@ -90,12 +125,32 @@ export default class SubstackGmailPlugin extends Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: 'sync-nostr-articles',
+			name: 'Sync Nostr long-form articles',
+			callback: () => {
+				this.syncNostrArticles();
+			}
+		});
+
+		this.addCommand({
+			id: 'sync-all-content',
+			name: 'Sync both Gmail and Nostr content',
+			callback: () => {
+				this.syncAllContent();
+			}
+		});
+
 		// Add settings tab
-		this.addSettingTab(new SubstackGmailSettingTab(this.app, this));
+		this.addSettingTab(new CatchmentSettingTab(this.app, this));
 
 		// Start automatic sync if configured
 		if (this.settings.syncFrequency > 0) {
-			this.startAutoSync();
+			this.startGmailAutoSync();
+		}
+
+		if (this.settings.nostrEnabled && this.settings.nostrSyncFrequency > 0) {
+			this.startNostrAutoSync();
 		}
 
 		// Add context menu item for note extraction
@@ -114,7 +169,6 @@ export default class SubstackGmailPlugin extends Plugin {
                 }
             })
         );
-
 	}
 
 	createNote(editor: any, view: any) {
@@ -139,6 +193,12 @@ export default class SubstackGmailPlugin extends Plugin {
 		if (this.syncInterval) {
 			window.clearInterval(this.syncInterval);
 		}
+		if (this.nostrSyncInterval) {
+			window.clearInterval(this.nostrSyncInterval);
+		}
+		if (this.nostrClient) {
+			this.nostrClient.disconnect();
+		}
 		server_.close()
 	}
 
@@ -149,11 +209,238 @@ export default class SubstackGmailPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 		this.initializeGoogleAuth(); // Reinitialize auth when settings change
+
+		// Reinitialize Nostr if settings changed
+		if (this.settings.nostrEnabled) {
+			this.initializeNostr();
+		} else if (this.nostrClient) {
+			this.nostrClient.disconnect();
+			this.nostrClient = null;
+		}
 	}
 
+	// Nostr initialization and methods
+	async initializeNostr() {
+		if (this.nostrClient) {
+			this.nostrClient.disconnect();
+		}
+
+		try {
+			this.nostrClient = new NostrNIP23Client(this.settings.nostrRelays);
+			console.log('Nostr client initialized successfully');
+		} catch (error) {
+			console.error('Failed to initialize Nostr client:', error);
+			new Notice('Failed to connect to Nostr relays');
+		}
+	}
+
+	startNostrAutoSync() {
+		if (this.nostrSyncInterval) {
+			window.clearInterval(this.nostrSyncInterval);
+		}
+
+		if (this.settings.nostrSyncFrequency > 0 && this.settings.nostrEnabled) {
+			this.nostrSyncInterval = window.setInterval(() => {
+				this.syncNostrArticles();
+			}, this.settings.nostrSyncFrequency * 60 * 1000);
+		}
+	}
+
+	async syncNostrArticles() {
+		if (!this.settings.nostrEnabled) {
+			new Notice('Nostr sync is disabled in settings');
+			return;
+		}
+
+		if (!this.nostrClient) {
+			await this.initializeNostr();
+		}
+
+		if (!this.nostrClient) {
+			new Notice('Failed to initialize Nostr client');
+			return;
+		}
+
+		if (this.settings.nostrFollowedAuthors.length === 0) {
+			new Notice('No Nostr authors configured. Please add pubkeys in settings.');
+			return;
+		}
+
+		new Notice('Syncing Nostr long-form articles...');
+
+		try {
+			// Ensure folder exists
+			await this.ensureFolderExists(this.settings.catchementFolder);
+
+			// Get existing files to avoid duplicates
+			const existingFiles = new Set<string>();
+			const folder = this.app.vault.getAbstractFileByPath(this.settings.catchementFolder);
+			if (folder && folder instanceof TFolder) {
+				folder.children.forEach((file) => {
+					if (file instanceof TFile) {
+						existingFiles.add(file.basename);
+					}
+				});
+			}
+
+			let processedCount = 0;
+
+			// NOTE; use lasy sync time if available, otherwise query up to limit
+			const sinceDate = this.settings.nostrLastSyncTime
+				? new Date(this.settings.nostrLastSyncTime * 1000)
+				: undefined
+
+
+			// NOTE: may want to do something like this if a lot of time has passed
+			// increase the limit, but this as is doesn't really make sense
+
+			// If we have a last sync time, we might want to increase the limit
+			// to ensure we get all new articles
+			// const queryLimit = sinceDate ? 50 : 10;
+			const queryLimit = this.settings.maxNostrQuery
+
+			this.nostrClient.getNostrData(30023, this.settings.nostrFollowedAuthors, queryLimit, (article) => {
+				this.processNostrArticle(article, existingFiles)
+					.then((processed) => {
+						if (processed) {
+							processedCount++
+						}
+					})
+					.catch((error) => {
+						console.error('Failed to process Nostr article:', error)
+					})
+			}, sinceDate)
+
+			// this.settings.nostrLastSyncTime = Math.floor(Date.now() / 1000);
+			// await this.saveSettings();
+			// XXX: DEBUG
+
+			// Show result after a delay to allow processing
+			setTimeout(() => {
+				new Notice(`Processed ${processedCount} new Nostr articles`);
+			}, 5000);
+
+		} catch (error) {
+			console.error('Nostr sync failed:', error);
+			new Notice('Failed to sync Nostr articles');
+		}
+	}
+
+	async processNostrArticle(article: any, existingFiles: Set<string>): Promise<boolean> {
+		try {
+			const title = article.parsed.title || 'Untitled Article';
+
+			// Create a safe filename
+			const sanitizedTitle = title.replace(/[<>:"/\\|?*]/g, '-').trim();
+			const filename = `${sanitizedTitle}`
+
+			// Check if file already exists
+			if (existingFiles.has(filename)) {
+				return false;
+			}
+
+			// Create markdown content
+			const markdownContent = this.createNostrMarkdownContent(article);
+
+			// Create the file
+			const filePath = `${this.settings.catchementFolder}/${filename}.md`;
+			await this.app.vault.create(filePath, markdownContent);
+
+			// Add to existing files set to prevent duplicates in current session
+			existingFiles.add(filename);
+
+			return true;
+		} catch (error) {
+			console.error('Error processing Nostr article:', error);
+			return false;
+		}
+	}
+
+	createNostrMarkdownContent(article: any): string {
+		const title = article.parsed.title || 'Untitled Article';
+		const author = this.settings.nostrFollowedAuthors.find(author => author.pubkey === article.pubkey)
+		const publishedDate = article.parsed.published_at
+			? new Date(article.parsed.published_at * 1000).toISOString()
+			: new Date(article.created_at * 1000).toISOString();
+		const summary = article.parsed.summary || '';
+		const hashtags = article.parsed.hashtags || [];
+		const references = article.parsed.references || [];
+
+		const frontmatter = `---
+title: "${title}"
+author: "${author.username}"
+pubkey: "${article.pubkey}"
+published: "${publishedDate}"
+summary: "${summary}"
+hashtags: [${hashtags.map(tag => `"${tag}"`).join(', ')}]
+nostr_id: "${article.id}"
+icon: NoNostrLogoPrpl
+type: nostr-article
+tags: [nostr, article, longform]
+---
+
+`;
+
+		let content = frontmatter;
+
+		// Add title
+		content += `# ${title}\n\n`;
+
+		// Add metadata
+		content += `**Author:** ${author.username}\n`;
+		content += `**Published:** ${publishedDate}\n`;
+
+		if (summary) {
+			content += `**Summary:** ${summary}\n`;
+		}
+
+		if (hashtags.length > 0) {
+			content += `**Tags:** ${hashtags.join(', ')}\n`;
+		}
+
+		content += '\n---\n\n';
+
+		// Add the article content
+		content += article.content;
+
+		// Add references if any
+		if (references.length > 0) {
+			content += '\n\n## References\n\n';
+			references.forEach((ref: string, index: number) => {
+				content += `${index + 1}. ${ref}\n`;
+			});
+		}
+
+		return content;
+	}
+
+	async syncAllContent() {
+		new Notice('Syncing all content sources...');
+
+		const promises = [];
+
+		// Sync Gmail if configured
+		if (this.settings.access_token) {
+			promises.push(this.syncNewsletters());
+		}
+
+		// Sync Nostr if enabled
+		if (this.settings.nostrEnabled) {
+			promises.push(this.syncNostrArticles());
+		}
+
+		try {
+			await Promise.all(promises);
+			new Notice('All content sources synced successfully');
+		} catch (error) {
+			console.error('Failed to sync all content:', error);
+			new Notice('Some content sources failed to sync');
+		}
+	}
+
+	// Existing Gmail methods remain the same...
 	async getPortFromURI(uri: string): Promise<number> {
 		const match = uri.match(/:([0-9]+)/m) || [];
-
 		return Number(match[1])
 	}
 
@@ -175,8 +462,6 @@ export default class SubstackGmailPlugin extends Plugin {
 
 			server_ = http.createServer(async (req, res) => {
 				try {
-					// XXX: testing
-					console.log(`HERE IN SERVER NOW...`)
 					if (req.url && req.url.indexOf('/oauth2callback') > -1) {
 						const qs = new url.URL(req.url, this.settings.redirect_uris[0]).searchParams
 						
@@ -191,15 +476,12 @@ export default class SubstackGmailPlugin extends Plugin {
 						if (browserWindow && !browserWindow.closed) {
 							browserWindow.close()
 							browserWindow = null;
-
-							// XXX: testing detach
 							console.log(`Window should close...`)
 						}
 						
 						resolve(tokens as any)
 					} 
 				} catch (err) {
-					// XXX: testing
 					console.log(`Error parsing auth token data: ${JSON.stringify(err)}`)
 					reject(err)
 				}
@@ -216,27 +498,16 @@ export default class SubstackGmailPlugin extends Plugin {
 		const expiryDate = this.settings.refresh_token_expiry
 		const notExpired = expiryDate > currentDate
 		const isInitialized = typeof this.oAuth2Client?.credentials?.refresh_token === "string"
-		// XXX: testing
-		console.log(`Initialize Auth...${isInitialized} && ${notExpired}`)
+
 		if (isInitialized && notExpired) {
-			// XXX: testing
-			console.log(`oAuth2Client already initialized...${isInitialized}`)
-			console.log(`notExpired: ${notExpired}`)
-			console.log(`Expiry date: ${this.oAuth2Client?.credentials.expiry_date}`)
-			console.log(`Current Date: ${currentDate}`)
-			console.log(`Refresh Expires: ${this.settings.refresh_token_expires_in}`)
-			console.log(`Last refreshed date: ${this.settings.last_refreshed_date}`)
 			return true
 		}
 
-		// XXX: testing
 		if (!notExpired) {
 			console.log(`Token is expired: ${expiryDate} < ${currentDate}`)
 		}
 
 		if (!this.settings.access_token) {
-			// XXX: testing
-			console.log(`Loading Data...`)
 			try {
 				const credentials = await this.loadData()
 				const { client_secret, client_id, redirect_uris, access_token, refresh_token, refresh_token_expiry, expiryDate } = credentials.installed
@@ -250,14 +521,11 @@ export default class SubstackGmailPlugin extends Plugin {
 			} catch (error) {
 				console.error('Failed to retreive credentials:', error);
 				new Notice('Failed to retreieve credentials')
-
 				return false
 			}
 		}
 
 		if (this.settings.client_id && this.settings.client_secret && !this.oAuth2Client) {
-			// XXX: testing
-			console.log(`Add ID and Secret and URIs to oAuth`)
 			try {
 				this.oAuth2Client = new google.auth.OAuth2(
 					this.settings.client_id,
@@ -267,21 +535,16 @@ export default class SubstackGmailPlugin extends Plugin {
 			} catch (error) {
 				console.error('Failed to initialize Google Authorization:', error);
 				new Notice('Failed to intialize Google Authorization')
-
 				return false
 			}
 		}
 
 		if (!this.settings.access_token || !this.settings.refresh_token || !notExpired) {
-			// XXX: testing
-			console.log('Getting new token for initiGoogleAuth...')
 			const tokens = await this.getNewTokens()
-			// XXX: testing
-			console.log(`Got token: ${JSON.stringify(tokens)}`)
 			this.settings.access_token = tokens.access_token
 			this.settings.refresh_token = tokens.refresh_token
 			this.settings.expiry_date = tokens.expiry_date
-			this.settings.refresh_token_expires_in = tokens.refresh_token_expires_in * 1000 // NOTE: in seconds convert to milliseconds
+			this.settings.refresh_token_expires_in = tokens.refresh_token_expires_in * 1000
 			this.settings.last_refreshed_date = Date.now()
 			this.settings.refresh_token_expiry = this.settings.last_refreshed_date + this.settings.refresh_token_expires_in
 			await this.saveSettings()
@@ -294,13 +557,10 @@ export default class SubstackGmailPlugin extends Plugin {
 		});
 
 		this.gmail = google.gmail({ version: 'v1', auth: this.oAuth2Client });
-		// XXX: testing
-		console.log(`Gmail Client Intialized...`)
-
 		return true
 	}
 
-	startAutoSync() {
+	startGmailAutoSync() {
 		if (this.syncInterval) {
 			window.clearInterval(this.syncInterval);
 		}
@@ -313,7 +573,6 @@ export default class SubstackGmailPlugin extends Plugin {
 	}
 
 	async refreshAccessToken(): Promise<boolean> {
-		// XXX: DEBUG
 		console.log(`Refreshing Token...`)
 		if (!this.oAuth2Client) {
 			new Notice('Refresh failed: OAuth client not initialized. Please configure credentials.');
@@ -322,7 +581,6 @@ export default class SubstackGmailPlugin extends Plugin {
 
 		try {
 			const { credentials } = await this.oAuth2Client.refreshAccessToken();
-			// XXX: DEBUG
 			console.log(`DEBUG Credentials refreshed: ${JSON.stringify(credentials)}`)
 			if (credentials.access_token) {
 				this.settings.access_token = credentials.access_token;
@@ -332,13 +590,11 @@ export default class SubstackGmailPlugin extends Plugin {
 		} catch (error) {
 			console.error('Failed to refresh access token:', error);
 			try {
-				// XXX: testing
 				console.log(`Reinitizaling...`)
 				this.initializeGoogleAuth()
 				return true;
 			} catch {
 				console.error(`Failed to re-Initialize Google Auth`)
-
 				new Notice('Unable to authenticate access with Gmail.')
 			}
 		}
@@ -360,11 +616,7 @@ export default class SubstackGmailPlugin extends Plugin {
 		} catch (error: any) {
 			const resp_err = error.response.data.error
 			if (resp_err === 'invalid_grant') {
-				// Token expired, try to refresh
 				if (await this.refreshAccessToken()) {
-					// XXX: testing
-					console.log(`Refreshing list success...`)
-					// Retry with new token
 					try {
 						const retryResponse = await this.gmail.users.messages.list({
 							userId: 'me',
@@ -424,7 +676,6 @@ export default class SubstackGmailPlugin extends Plugin {
 		new Notice('Syncing Substack newsletters...');
 
 		try {
-			// Search for Substack emails
 			const query = 'from:substack.com AND -from:no-reply@substack.com AND -label:CATEGORY_PROMOTION AND -replyto:no-reply@substack.com';
 			const messagesResponse = await this.listGmailMessages({
 					q: query,
@@ -433,7 +684,6 @@ export default class SubstackGmailPlugin extends Plugin {
 
 			if (!messagesResponse || !messagesResponse.messages) {
 				new Notice('No Substack newsletters found');
-				// XXX: testing
 				console.log(`Message Response from Gmail: ${JSON.stringify(messagesResponse)}`)
 				return;
 			}
@@ -441,7 +691,6 @@ export default class SubstackGmailPlugin extends Plugin {
 			let processedCount = 0;
 			const existingFiles = new Set<string>();
 
-			// Get existing files in the Substack folder
 			const folder = this.app.vault.getAbstractFileByPath(this.settings.catchementFolder);
 			if (folder && folder instanceof TFolder) {
 				folder.children.forEach((file) => {
@@ -481,33 +730,25 @@ export default class SubstackGmailPlugin extends Plugin {
 			return false
 		}
 
-		// Extract publication name from the From header
 		const publicationMatch = from.match(/^(.+?)\s*<.*@substack\.com>/);
 		const publication = publicationMatch ? publicationMatch[1].trim() : 'Unknown Publication';
 
-		// Create a safe filename
 		const sanitizedSubject = subject.replace(/[<>:"/\\|?*]/g, '-').trim();
 		const filename = `${sanitizedSubject}`;
 
-
-		// Check if file already exists
 		if (existingFiles.has(filename)) {
 			return false;
 		}
 
-		// Extract email content
 		let content = this.extractEmailContent(message);
 		if (!content) {
 			content = message.snippet || 'No content available';
 		}
 
-		// Create markdown content
 		const markdownContent = this.createMarkdownContent(subject, publication, from, date, content);
 
-		// Ensure folder exists
 		await this.ensureFolderExists(this.settings.catchementFolder);
 
-		// Create the file
 		const filePath = `${this.settings.catchementFolder}/${filename}.md`;
 		await this.app.vault.create(filePath, markdownContent);
 
@@ -515,7 +756,6 @@ export default class SubstackGmailPlugin extends Plugin {
 	}
 
 	extractEmailContent(message: GmailMessage): string {
-		// Try to get HTML content first, then plain text
 		let content = '';
 
 		if (message.payload.parts) {
@@ -532,37 +772,17 @@ export default class SubstackGmailPlugin extends Plugin {
 		}
 
 		content = convertHtmltoMarkdown(content);
-
 		return content;
 	}
 
 	decodeBase64(data: string): string {
 		try {
-			// Gmail uses URL-safe base64
 			const base64 = data.replace(/-/g, '+').replace(/_/g, '/');
 			return atob(base64);
 		} catch (error) {
 			console.error('Failed to decode base64:', error);
 			return '';
 		}
-	}
-
-	htmlToMarkdown(html: string): string {
-		// Basic HTML to Markdown conversion
-		return html
-			.replace(/<h([1-6])>/gi, (match, level) => '#'.repeat(parseInt(level)) + ' ')
-			.replace(/<\/h[1-6]>/gi, '\n\n')
-			.replace(/<p>/gi, '')
-			.replace(/<\/p>/gi, '\n\n')
-			.replace(/<br\s*\/?>/gi, '\n')
-			.replace(/<strong>|<b>/gi, '**')
-			.replace(/<\/strong>|<\/b>/gi, '**')
-			.replace(/<em>|<i>/gi, '*')
-			.replace(/<\/em>|<\/i>/gi, '*')
-			.replace(/<a\s+href="([^"]*)"[^>]*>([^<]*)<\/a>/gi, '[$2]($1)')
-			.replace(/<[^>]*>/g, '') // Remove remaining HTML tags
-			.replace(/\n\s*\n\s*\n/g, '\n\n') // Clean up multiple newlines
-			.trim();
 	}
 
 	createMarkdownContent(subject: string, publication: string, from: string, date: string, content: string): string {
@@ -572,6 +792,7 @@ publication: "${publication}"
 author: "${from}"
 date: "${date}"
 type: substack-newsletter
+icon: NoSubstack
 tags: [newsletter, substack]
 ---
 
@@ -588,10 +809,16 @@ tags: [newsletter, substack]
 	}
 }
 
-class SubstackGmailSettingTab extends PluginSettingTab {
-	plugin: SubstackGmailPlugin;
+class CatchmentSettingTab extends PluginSettingTab {
+	plugin: CatchementPlugin;
 
-	constructor(app: App, plugin: SubstackGmailPlugin) {
+	nostrClient = new NostrNIP23Client([
+			"wss://relay.damus.io",
+			"wss://nos.lol",
+			"wss://relay.snort.social"
+	])
+
+	constructor(app: App, plugin: CatchementPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
@@ -600,70 +827,10 @@ class SubstackGmailSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		containerEl.createEl('h2', { text: 'Substack Gmail Sync Settings' });
+		containerEl.createEl('h2', { text: 'Content Sync Settings' });
 
-		// Instructions
-		// containerEl.createEl('p', {
-		// 	text: 'To use this plugin, you need to set up Gmail API access. Follow these steps:'
-		// });
-
-		// // XXX: might not need this since data all in credentials.json?
-		// const instructions = containerEl.createEl('ol');
-		// instructions.createEl('li', { text: 'Go to the Google Cloud Console' });
-		// instructions.createEl('li', { text: 'Create a new project or select an existing one' });
-		// instructions.createEl('li', { text: 'Enable the Gmail API' });
-		// instructions.createEl('li', { text: 'Create OAuth 2.0 credentials' });
-		// instructions.createEl('li', { text: 'Use the authorization URL to get access and refresh tokens' });
-
-		// // Gmail API Settings
-		// containerEl.createEl('h3', { text: 'Gmail API Configuration' });
-
-		// new Setting(containerEl)
-		// 	.setName('Client ID')
-		// 	.setDesc('OAuth 2.0 Client ID from Google Cloud Console')
-		// 	.addText(text => text
-		// 		.setPlaceholder('Enter your Client ID')
-		// 		.setValue(this.plugin.settings.client_id)
-		// 		.onChange(async (value) => {
-		// 			this.plugin.settings.client_id = value;
-		// 			await this.plugin.saveSettings();
-		// 		}));
-
-		// new Setting(containerEl)
-		// 	.setName('Client Secret')
-		// 	.setDesc('OAuth 2.0 Client Secret from Google Cloud Console')
-		// 	.addText(text => text
-		// 		.setPlaceholder('Enter your Client Secret')
-		// 		.setValue(this.plugin.settings.client_secret)
-		// 		.onChange(async (value) => {
-		// 			this.plugin.settings.client_secret = value;
-		// 			await this.plugin.saveSettings();
-		// 		}));
-
-		// new Setting(containerEl)
-		// 	.setName('Access Token')
-		// 	.setDesc('OAuth 2.0 Access Token')
-		// 	.addText(text => text
-		// 		.setPlaceholder('Enter your Access Token')
-		// 		.setValue(this.plugin.settings.access_token)
-		// 		.onChange(async (value) => {
-		// 			this.plugin.settings.access_token = value;
-		// 			await this.plugin.saveSettings();
-		// 		}));
-
-		// new Setting(containerEl)
-		// 	.setName('Refresh Token')
-		// 	.setDesc('OAuth 2.0 Refresh Token')
-		// 	.addText(text => text
-		// 		.setPlaceholder('Enter your Refresh Token')
-		// 		.setValue(this.plugin.settings.refreshToken)
-		// 		.onChange(async (value) => {
-		// 			this.plugin.settings.refreshToken = value;
-		// 			await this.plugin.saveSettings();
-		// 		}));
-
-		// Sync Settings
-		containerEl.createEl('h3', { text: 'Sync Configuration' });
+		// Gmail Sync Settings
+		containerEl.createEl('h3', { text: 'Gmail Sync Configuration' });
 
 		new Setting(containerEl)
 			.setName('Substack Folder')
@@ -680,7 +847,6 @@ class SubstackGmailSettingTab extends PluginSettingTab {
 			.setName('Max Emails')
 			.setDesc('Maximum number of emails to fetch per sync')
 			.addSlider(slider => slider
-				// XXX: testing
 				.setLimits(10, 200, 10)
 				.setValue(this.plugin.settings.maxEmails)
 				.setDynamicTooltip()
@@ -690,8 +856,8 @@ class SubstackGmailSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Auto-sync Frequency')
-			.setDesc('How often to automatically sync (in minutes, 0 to disable)')
+			.setName('Gmail Auto-sync Frequency')
+			.setDesc('How often to automatically sync Gmail (in minutes, 0 to disable)')
 			.addSlider(slider => slider
 				.setLimits(0, 1440, 30)
 				.setValue(this.plugin.settings.syncFrequency)
@@ -699,31 +865,243 @@ class SubstackGmailSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.syncFrequency = value;
 					await this.plugin.saveSettings();
-					this.plugin.startAutoSync();
+					this.plugin.startGmailAutoSync();
 				}));
 
-		// Manual sync button
+		// Nostr Settings
+		containerEl.createEl('h3', { text: 'Nostr Configuration' });
+
 		new Setting(containerEl)
-			.setName('Manual Sync')
-			.setDesc('Manually sync newsletters now')
+			.setName('Enable Nostr Sync')
+			.setDesc('Enable syncing of long-form articles from Nostr')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.nostrEnabled)
+				.onChange(async (value) => {
+					this.plugin.settings.nostrEnabled = value;
+					await this.plugin.saveSettings();
+					this.display(); // Refresh to show/hide Nostr settings
+				}));
+
+		if (this.plugin.settings.nostrEnabled) {
+			new Setting(containerEl)
+				.setName('Nostr Articles Folder')
+				.setDesc('Folder where Nostr articles will be saved')
+				.addText(text => text
+					.setPlaceholder('Nostr Articles')
+					.setValue(this.plugin.settings.catchementFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.catchementFolder = value;
+						await this.plugin.saveSettings();
+					}));
+
+			new Setting(containerEl)
+				.setName('Nostr Auto-sync Frequency')
+				.setDesc('How often to automatically sync Nostr articles (in minutes, 0 to disable)')
+				.addSlider(slider => slider
+					.setLimits(0, 1440, 30)
+					.setValue(this.plugin.settings.nostrSyncFrequency)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.nostrSyncFrequency = value;
+						await this.plugin.saveSettings();
+						this.plugin.startNostrAutoSync();
+					}));
+
+			// Nostr Relays
+			containerEl.createEl('h4', { text: 'Nostr Relays' });
+			containerEl.createEl('p', {
+				text: 'Add or remove Nostr relays (one per line). These are the servers that will be queried for articles.',
+				cls: 'setting-item-description'
+			});
+
+			new Setting(containerEl)
+				.setName('Nostr Relays')
+				.setDesc('List of Nostr relays to connect to')
+				.addTextArea(text => {
+					text.inputEl.rows = 6;
+					text.inputEl.cols = 50;
+					return text
+						.setPlaceholder('wss://relay.damus.io\nwss://nos.lol\nwss://relay.snort.social')
+						.setValue(this.plugin.settings.nostrRelays.join('\n'))
+						.onChange(async (value) => {
+							this.plugin.settings.nostrRelays = value
+								.split('\n')
+								.map(relay => relay.trim())
+								.filter(relay => relay.length > 0);
+							await this.plugin.saveSettings();
+						});
+				});
+
+			// Add pubkey helper
+			containerEl.createEl('div', {
+				text: '💡 Tip: You can paste npub1... format or hex pubkeys. The plugin will handle both formats.',
+				cls: 'setting-item-description',
+				attr: { style: 'margin-top: 8px; font-style: italic; color: var(--text-muted);' }
+			});
+
+			// Quick add author section
+			const quickAddContainer = containerEl.createDiv({ cls: 'setting-item' });
+			quickAddContainer.createEl('div', {
+				text: 'Quick Add Author',
+				cls: 'setting-item-name'
+			});
+			quickAddContainer.createEl('div', {
+				text: 'Paste a pubkey here to quickly add it to your followed authors',
+				cls: 'setting-item-description'
+			});
+
+			const inputContainer = quickAddContainer.createDiv({ cls: 'setting-item-control' });
+			const quickAddInput = inputContainer.createEl('input', {
+				type: 'text',
+				placeholder: 'npub1... or hex pubkey',
+				attr: { style: 'width: 300px; margin-right: 8px;' }
+			});
+
+			const addButton = inputContainer.createEl('button', {
+				text: 'Add Author',
+				cls: 'mod-cta'
+			});
+
+			addButton.onclick = async () => {
+				const npub = this.cleanPubkey(quickAddInput.value);
+				const nostrFollowedPubkeys = this.plugin.settings.nostrFollowedAuthors.map(x => x.npub)
+				if (npub && !nostrFollowedPubkeys.includes(npub)) {
+
+					const nostrAuthor = {
+						npub: npub,
+					}
+					const metadata = await this.nostrClient.getNostrData(0, [nostrAuthor], 1, () => {})
+
+					this.plugin.settings.nostrFollowedAuthors.push({
+						pubkey: metadata.pubkey,
+						npub: npub,
+						username: metadata.username,
+						display_name: metadata.display_name,
+						lastUpdated: Date.now(),
+					});
+					await this.plugin.saveSettings();
+					quickAddInput.value = '';
+					this.display(); // Refresh to show updated list
+					new Notice('Author added successfully!');
+				} else if (!npub) {
+					new Notice('Please enter a valid npub');
+				} else {
+					new Notice('Author already in the list');
+				}
+			};
+
+			// Current followed authors display
+			if (this.plugin.settings.nostrFollowedAuthors.length > 0) {
+				containerEl.createEl('h5', { text: 'Currently Following:' });
+				const followedList = containerEl.createEl('div', { cls: 'nostr-followed-list' });
+
+				this.plugin.settings.nostrFollowedAuthors.forEach((author, index) => {
+					const authorItem = followedList.createDiv({ cls: 'nostr-author-item' });
+					authorItem.style.cssText = 'display: flex; align-items: center; margin: 4px 0; padding: 8px; background: var(--background-secondary); border-radius: 4px;';
+
+				// Add username display
+				const usernameSpan = authorItem.createSpan({
+				    text: author.username || author.display_name || 'Unknown',
+				    attr: { style: 'flex: 1; font-size: 14px; color: var(--text-normal);' }
+				});
+				const npubSpan = authorItem.createSpan({
+				    text: this.truncatePubkey(author.npub),
+				    attr: { style: 'flex: 0 0 auto; font-family: monospace; font-size: 12px; margin-right: 8px;' }
+				});
+						const removeButton = authorItem.createEl('button', {
+						text: '×',
+						attr: {
+							style: 'margin-left: 8px; padding: 2px 6px; background: var(--interactive-accent); color: white; border: none; border-radius: 2px; cursor: pointer;',
+							title: 'Remove this author'
+						}
+					});
+
+					removeButton.onclick = async () => {
+						this.plugin.settings.nostrFollowedAuthors.splice(index, 1);
+						await this.plugin.saveSettings();
+						this.display();
+						new Notice('Author removed');
+					};
+				});
+			}
+		}
+
+		// Manual sync buttons
+		containerEl.createEl('h3', { text: 'Manual Sync' });
+
+		new Setting(containerEl)
+			.setName('Sync Gmail Newsletters')
+			.setDesc('Manually sync Substack newsletters from Gmail')
 			.addButton(button => button
-				.setButtonText('Sync Now')
+				.setButtonText('Sync Gmail')
 				.setCta()
 				.onClick(() => {
 					this.plugin.syncNewsletters();
 				}));
 
-		// OAuth Helper
-		// containerEl.createEl('h3', { text: 'OAuth Helper' });
-		// containerEl.createEl('p', {
-		// 	text: 'Use this URL for OAuth authorization (replace YOUR_CLIENT_ID):'
-		// });
+		if (this.plugin.settings.nostrEnabled) {
+			new Setting(containerEl)
+				.setName('Sync Nostr Articles')
+				.setDesc('Manually sync long-form articles from Nostr')
+				.addButton(button => button
+					.setButtonText('Sync Nostr')
+					.setCta()
+					.onClick(() => {
+						this.plugin.syncNostrArticles();
+					}));
+		}
 
-		// const authUrl = `https://accounts.google.com/o/oauth2/auth?client_id=YOUR_CLIENT_ID&redirect_uri=urn:ietf:wg:oauth:2.0:oob&scope=https://www.googleapis.com/auth/gmail.readonly&response_type=code&access_type=offline`;
+		new Setting(containerEl)
+			.setName('Sync All Sources')
+			.setDesc('Sync content from all enabled sources')
+			.addButton(button => button
+				.setButtonText('Sync All')
+				.setClass('mod-warning')
+				.onClick(() => {
+					this.plugin.syncAllContent();
+				}));
+	}
+
+	// Helper method to clean and validate pubkeys
+	cleanPubkey(pubkey: string): string {
+		if (!pubkey) return '';
+
+		pubkey = pubkey.trim();
+
+		// Handle npub format (bech32)
+		if (pubkey.startsWith('npub1')) {
+			try {
+				// You might want to add bech32 decoding here
+				// For now, we'll store the npub format and handle conversion in the Nostr client
+				return pubkey;
+			} catch (error) {
+				console.error('Invalid npub format:', error);
+				return '';
+			}
+		}
+
+		// Handle hex format
+		if (/^[a-fA-F0-9]{64}$/.test(pubkey)) {
+			return pubkey.toLowerCase();
+		}
+
+		// If it's not recognizable format, try to clean it
+		const cleaned = pubkey.replace(/[^a-fA-F0-9npub]/g, '');
+		if (cleaned.startsWith('npub1') && cleaned.length > 60) {
+			return cleaned;
+		}
+		if (/^[a-fA-F0-9]{64}$/.test(cleaned)) {
+			return cleaned.toLowerCase();
+		}
 		
-		// containerEl.createEl('code', {
-		// 	text: authUrl,
-		// 	attr: { style: 'word-break: break-all; font-size: 12px;' }
-		// });
+		return '';
+	}
+
+	// Helper method to truncate pubkeys for display
+	truncatePubkey(pubkey: string): string {
+		if (pubkey.startsWith('npub1')) {
+			return pubkey.length > 20 ? `${pubkey.substring(0, 16)}...` : pubkey;
+		}
+		return pubkey.length > 16 ? `${pubkey.substring(0, 8)}...${pubkey.substring(-8)}` : pubkey;
 	}
 }

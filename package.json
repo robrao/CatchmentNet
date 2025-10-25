@@ -19,7 +19,8 @@
 	"license": "MIT",
 	"dependencies": {
 		"google-auth-library": "^9.0.0",
-		"googleapis": "^140.0.1"
+		"googleapis": "^140.0.1",
+		"nostr-tools": "^2.17.0"
 	},
 	"devDependencies": {
 		"@types/node": "^16.11.6",
@@ -30,7 +31,7 @@
 		"jsdom": "^26.1.0",
 		"obsidian": "latest",
 		"tslib": "2.4.0",
-		"typescript": "4.7.4"
+		"typescript": "^5.9.2"
 	},
 	"repository": {
 		"type": "git",
