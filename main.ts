@@ -44,6 +44,8 @@ interface CatchementSettings {
 	nostrSyncFrequency: number; // in minutes
 	nostrLastSyncTime?: number; // Unix timestamp in seconds
 	maxNostrQuery: number;
+	substackIcon: string;
+	nostrIcon: string;
 }
 
 interface GmailTokens {
@@ -79,7 +81,9 @@ const DEFAULT_SETTINGS: CatchementSettings = {
 	],
 	nostrFollowedAuthors: [],
 	nostrSyncFrequency: 30,
-	maxNostrQuery: 50
+	maxNostrQuery: 50,
+	substackIcon: '',
+	nostrIcon: '',
 };
 
 interface GmailMessage {
@@ -374,7 +378,7 @@ published: "${publishedDate}"
 summary: "${summary}"
 hashtags: [${hashtags.map(tag => `"${tag}"`).join(', ')}]
 nostr_id: "${article.id}"
-icon: NoNostrLogoPrpl
+icon: "${this.settings.nostrIcon}"
 type: nostr-article
 tags: [nostr, article, longform]
 ---
@@ -792,7 +796,7 @@ publication: "${publication}"
 author: "${from}"
 date: "${date}"
 type: substack-newsletter
-icon: NoSubstack
+icon: "${this.settings.substackIcon}"
 tags: [newsletter, substack]
 ---
 
@@ -830,11 +834,11 @@ class CatchmentSettingTab extends PluginSettingTab {
 		containerEl.createEl('h2', { text: 'Content Sync Settings' });
 
 		// Gmail Sync Settings
-		containerEl.createEl('h3', { text: 'Gmail Sync Configuration' });
+		containerEl.createEl('h3', { text: 'Sync Configuration' });
 
 		new Setting(containerEl)
-			.setName('Substack Folder')
-			.setDesc('Folder where newsletters will be saved')
+			.setName('Articles Folder')
+			.setDesc('Folder where substack and nostr articles will be saved')
 			.addText(text => text
 				.setPlaceholder('Substack Newsletters')
 				.setValue(this.plugin.settings.catchementFolder)
@@ -859,7 +863,7 @@ class CatchmentSettingTab extends PluginSettingTab {
 			.setName('Gmail Auto-sync Frequency')
 			.setDesc('How often to automatically sync Gmail (in minutes, 0 to disable)')
 			.addSlider(slider => slider
-				.setLimits(0, 1440, 30)
+				.setLimits(0, 1440, 0)
 				.setValue(this.plugin.settings.syncFrequency)
 				.setDynamicTooltip()
 				.onChange(async (value) => {
@@ -868,8 +872,16 @@ class CatchmentSettingTab extends PluginSettingTab {
 					this.plugin.startGmailAutoSync();
 				}));
 
-		// Nostr Settings
-		containerEl.createEl('h3', { text: 'Nostr Configuration' });
+		new Setting(containerEl)
+			.setName('Substack Articles Icon Name')
+			.setDesc('Name of Icon to display beside substack articles.')
+			.addText(text => text
+				.setPlaceholder('Icon Name')
+				.setValue(this.plugin.settings.substackIcon)
+				.onChange(async (value) => {
+					this.plugin.settings.substackIcon = value;
+					await this.plugin.saveSettings();
+				}));
 
 		new Setting(containerEl)
 			.setName('Enable Nostr Sync')
@@ -884,17 +896,6 @@ class CatchmentSettingTab extends PluginSettingTab {
 
 		if (this.plugin.settings.nostrEnabled) {
 			new Setting(containerEl)
-				.setName('Nostr Articles Folder')
-				.setDesc('Folder where Nostr articles will be saved')
-				.addText(text => text
-					.setPlaceholder('Nostr Articles')
-					.setValue(this.plugin.settings.catchementFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.catchementFolder = value;
-						await this.plugin.saveSettings();
-					}));
-
-			new Setting(containerEl)
 				.setName('Nostr Auto-sync Frequency')
 				.setDesc('How often to automatically sync Nostr articles (in minutes, 0 to disable)')
 				.addSlider(slider => slider
@@ -906,6 +907,17 @@ class CatchmentSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 						this.plugin.startNostrAutoSync();
 					}));
+			new Setting(containerEl)
+				.setName('Nostr Articles Icon Name')
+				.setDesc('Name of Icon to display beside nostr articles.')
+				.addText(text => text
+					.setPlaceholder('Icon Name')
+					.setValue(this.plugin.settings.nostrIcon)
+					.onChange(async (value) => {
+						this.plugin.settings.nostrIcon = value;
+						await this.plugin.saveSettings();
+					}));
+
 
 			// Nostr Relays
 			containerEl.createEl('h4', { text: 'Nostr Relays' });
