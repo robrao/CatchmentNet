@@ -315,9 +315,8 @@ export default class CatchementPlugin extends Plugin {
 					})
 			}, sinceDate)
 
-			// this.settings.nostrLastSyncTime = Math.floor(Date.now() / 1000);
-			// await this.saveSettings();
-			// XXX: DEBUG
+			this.settings.nostrLastSyncTime = Math.floor(Date.now() / 1000);
+			await this.saveSettings();
 
 			// Show result after a delay to allow processing
 			setTimeout(() => {
