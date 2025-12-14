@@ -1,5 +1,5 @@
 // main.ts
-import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, TFolder, Menu } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, TFolder } from 'obsidian';
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
 import { assertPresent } from 'typeHelpers';
@@ -9,6 +9,7 @@ import { NostrNIP23Client } from './nostr';
 
 import * as http from 'http';
 import * as url from 'url';
+import destroyer from 'server-destroy'
 
 let server_ = http.createServer()
 
@@ -46,6 +47,7 @@ interface CatchementSettings {
 	maxNostrQuery: number;
 	substackIcon: string;
 	nostrIcon: string;
+	filenameLength: number;
 }
 
 interface GmailTokens {
@@ -84,6 +86,7 @@ const DEFAULT_SETTINGS: CatchementSettings = {
 	maxNostrQuery: 50,
 	substackIcon: '',
 	nostrIcon: '',
+	filenameLength: 59
 };
 
 interface GmailMessage {
@@ -116,8 +119,7 @@ export default class CatchementPlugin extends Plugin {
 
 		// Add ribbon icon for Nostr sync
 		this.addRibbonIcon('globe', 'Sync Articles', (evt: MouseEvent) => {
-			this.syncNostrArticles();
-			this.syncNewsletters();
+			this.syncAllContent()
 		});
 
 		// Add commands
@@ -145,6 +147,25 @@ export default class CatchementPlugin extends Plugin {
 			}
 		});
 
+		//XXX: Development/Testing command - remove in production
+		this.addCommand({
+			id: 'test-oauth-reauth',
+			name: 'Test OAuth Re-authorization (Dev)',
+			callback: async () => {
+				// Force token expiration
+				this.settings.expiry_date = Date.now() - 1000;
+				this.settings.refresh_token_expiry = Date.now() - 1000;
+				await this.saveSettings();
+				
+				new Notice('Tokens expired, triggering reauthorization...');
+				
+				// Trigger sync which will cause reauth
+				setTimeout(() => {
+					this.syncNewsletters();
+				}, 500);
+			}
+		});
+
 		// Add settings tab
 		this.addSettingTab(new CatchmentSettingTab(this.app, this));
 
@@ -158,40 +179,40 @@ export default class CatchementPlugin extends Plugin {
 		}
 
 		// Add context menu item for note extraction
-        this.registerEvent(
-            this.app.workspace.on('editor-menu', (menu, editor, view) => {
-                const selection = editor.getSelection();
-                if (selection && selection.trim().length > 0) {
-                    menu.addItem((item) => {
-                        item
-                            .setTitle('Take Note')
-                            .setIcon('quote-glyph')
-                            .onClick(() => {
-                                this.createNote(editor, view)
-                            });
-                    });
-                }
-            })
-        );
+		this.registerEvent(
+			this.app.workspace.on('editor-menu', (menu, editor, view) => {
+				const selection = editor.getSelection();
+				if (selection && selection.trim().length > 0) {
+					menu.addItem((item) => {
+						item
+							.setTitle('Take Note')
+							.setIcon('quote-glyph')
+							.onClick(() => {
+								this.createNote(editor, view)
+							});
+					});
+				}
+			})
+		);
 	}
 
 	createNote(editor: any, view: any) {
-        const selectedText = editor.getSelection();
-        
-        if (!selectedText || selectedText.trim().length === 0) {
-            new Notice('Please select some text to extract');
-            return;
-        }
+		const selectedText = editor.getSelection();
+		
+		if (!selectedText || selectedText.trim().length === 0) {
+			new Notice('Please select some text to extract');
+			return;
+		}
 
-        if (!view.file) {
-            new Notice('No active file found');
-            return;
-        }
+		if (!view.file) {
+			new Notice('No active file found');
+			return;
+		}
 
-        // Open the extraction modal
-        const modal = new NoteModal(this.app, this, selectedText.trim(), view.file, this.settings.catchementFolder);
-        modal.open();
-    }
+		// Open the extraction modal
+		const modal = new NoteModal(this.app, this, selectedText.trim(), view.file, this.settings.catchementFolder);
+		modal.open();
+	}
 
 	onunload() {
 		if (this.syncInterval) {
@@ -211,6 +232,8 @@ export default class CatchementPlugin extends Plugin {
 	}
 
 	async saveSettings() {
+		// XXX: debug
+		console.log(`Save Settings...`)
 		await this.saveData(this.settings);
 		this.initializeGoogleAuth(); // Reinitialize auth when settings change
 
@@ -248,6 +271,17 @@ export default class CatchementPlugin extends Plugin {
 				this.syncNostrArticles();
 			}, this.settings.nostrSyncFrequency * 60 * 1000);
 		}
+	}
+
+	async formatFilename(name: string) {
+		let sanitizedTitle = name.replace(/[<>:"/\\|?*]/g, '-').trim();
+
+		// NOTE: assuming obsidian filename allows 62 characters
+		if (sanitizedTitle.length > this.settings.filenameLength+3) {
+			sanitizedTitle = sanitizedTitle.slice(0, this.settings.filenameLength) + '...';
+		}
+
+		return sanitizedTitle
 	}
 
 	async syncNostrArticles() {
@@ -321,7 +355,7 @@ export default class CatchementPlugin extends Plugin {
 			// Show result after a delay to allow processing
 			setTimeout(() => {
 				new Notice(`Processed ${processedCount} new Nostr articles`);
-			}, 5000);
+			}, 7000);
 
 		} catch (error) {
 			console.error('Nostr sync failed:', error);
@@ -334,7 +368,7 @@ export default class CatchementPlugin extends Plugin {
 			const title = article.parsed.title || 'Untitled Article';
 
 			// Create a safe filename
-			const sanitizedTitle = title.replace(/[<>:"/\\|?*]/g, '-').trim();
+			const sanitizedTitle = await this.formatFilename(title)
 			const filename = `${sanitizedTitle}`
 
 			// Check if file already exists
@@ -460,39 +494,130 @@ tags: [nostr, article, longform]
 				console.log("Server is listening on port, destroy before creating new one.")
 				server_.close()
 			}
-
-			let browserWindow: Window | null = null;
-
 			server_ = http.createServer(async (req, res) => {
 				try {
 					if (req.url && req.url.indexOf('/oauth2callback') > -1) {
-						const qs = new url.URL(req.url, this.settings.redirect_uris[0]).searchParams
+						const qs = new url.URL(req.url, this.settings.redirect_uris[0]).searchParams;
+					
+						// Check for OAuth error response
+						const error = qs.get("error");
+						if (error) {
+							console.log(`OAuth error: ${error}`);
+							const errorDescription = qs.get("error_description") || "Unknown error";
 						
-						console.log(`Closing Server...`)
-						server_.close()
-						
-						const code = qs.get("code")
-						assertPresent(code, "Could not get token code.")
-						const { tokens } = await this.oAuth2Client.getToken(code)
-						this.oAuth2Client.setCredentials(tokens)
-
-						if (browserWindow && !browserWindow.closed) {
-							browserWindow.close()
-							browserWindow = null;
-							console.log(`Window should close...`)
+							// Send error page that auto-closes
+							res.writeHead(200, {'Content-Type': 'text/html'});
+							res.end(`
+								<html>
+									<head>
+										<style>
+											body { font-family: Arial, sans-serif; padding: 40px; text-align: center; }
+											.error { color: #d73a49; }
+										</style>
+									</head>
+									<body>
+										<h1 class="error">Authentication Failed</h1>
+										<p>Error: ${error}</p>
+										<p>${errorDescription}</p>
+										<p>This window will close in 3 seconds...</p>
+										<script>
+											setTimeout(() => window.close(), 3000);
+										</script>
+									</body>
+								</html>
+							`);
+							
+							server_.close();
+							reject(new Error(`OAuth failed: ${error} - ${errorDescription}`));
+							return;
 						}
+					
+						// Try to get the authorization code
+						const code = qs.get("code");
+						if (!code) {
+							// No code and no error - something went wrong
+							res.writeHead(200, {'Content-Type': 'text/html'});
+							res.end(`
+								<html>
+									<body>
+										<h1 style="color: #d73a49;">Authentication Failed</h1>
+										<p>No authorization code received.</p>
+										<p>This window will close in 3 seconds...</p>
+										<script>
+											setTimeout(() => window.close(), 3000);
+										</script>
+									</body>
+								</html>
+							`);
+							
+							server_.close();
+							reject(new Error("No authorization code received"));
+							return;
+						}
+					
+						// Success case - get tokens
+						const { tokens } = await this.oAuth2Client.getToken(code);
+						this.oAuth2Client.setCredentials(tokens);
+					
+						// Send success page that auto-closes
+						res.writeHead(200, {'Content-Type': 'text/html'});
+						res.end(`
+							<html>
+								<head>
+									<style>
+										body { font-family: Arial, sans-serif; padding: 40px; text-align: center; }
+										.success { color: #28a745; }
+									</style>
+								</head>
+								<body>
+									<h1 class="success">Authentication Successful!</h1>
+									<p>You can now use the Gmail sync feature.</p>
+									<p>This window will close automatically...</p>
+									<script>
+										window.close();
+										// Fallback if window.close() doesn't work
+										setTimeout(() => {
+											document.body.innerHTML = '<p>You can now close this window.</p>';
+										}, 1000);
+									</script>
+								</body>
+							</html>
+						`);
 						
-						resolve(tokens as any)
-					} 
+						server_.close();
+						resolve(tokens as any);
+					}
 				} catch (err) {
-					console.log(`Error parsing auth token data: ${JSON.stringify(err)}`)
-					reject(err)
+					console.log(`Error in OAuth callback: ${JSON.stringify(err)}`);
+				
+					// Send error response even for unexpected errors
+					try {
+						res.writeHead(200, {'Content-Type': 'text/html'});
+						res.end(`
+							<html>
+								<body>
+									<h1 style="color: #d73a49;">Authentication Error</h1>
+									<p>An unexpected error occurred. Please try again.</p>
+									<p>This window will close in 3 seconds...</p>
+									<script>
+										setTimeout(() => window.close(), 3000);
+									</script>
+								</body>
+							</html>
+						`);
+					} catch (e) {
+						// If we can't even send a response, just log it
+						console.error('Failed to send error response:', e);
+					}
+
+					reject(err);
 				}
 			})
 
 			server_.listen(LISTEN_PORT, () => {
 				window.open(authUrl, '_blank')
 			})
+			destroyer(server_)
 		})
 	}
 
@@ -606,8 +731,10 @@ tags: [nostr, article, longform]
 
 	async listGmailMessages(params: any = {}): Promise<any> {
 		if (!this.gmail) {
+			// XXX: debug
 			console.log(`listGmailMessages Initializing Gmail`)
 			await this.initializeGoogleAuth()
+			console.log(`ListingGmail Complete`)
 		}
 
 		try {
@@ -619,6 +746,8 @@ tags: [nostr, article, longform]
 		} catch (error: any) {
 			const resp_err = error.response.data.error
 			if (resp_err === 'invalid_grant') {
+				// XXX: debug
+				console.log(`ListGmailRefreshToken initiating.`)
 				if (await this.refreshAccessToken()) {
 					try {
 						const retryResponse = await this.gmail.users.messages.list({
@@ -736,7 +865,7 @@ tags: [nostr, article, longform]
 		const publicationMatch = from.match(/^(.+?)\s*<.*@substack\.com>/);
 		const publication = publicationMatch ? publicationMatch[1].trim() : 'Unknown Publication';
 
-		const sanitizedSubject = subject.replace(/[<>:"/\\|?*]/g, '-').trim();
+		const sanitizedSubject = await this.formatFilename(subject)
 		const filename = `${sanitizedSubject}`;
 
 		if (existingFiles.has(filename)) {
@@ -748,7 +877,8 @@ tags: [nostr, article, longform]
 			content = message.snippet || 'No content available';
 		}
 
-		const markdownContent = this.createMarkdownContent(subject, publication, from, date, content);
+		// XXX: replace on author still doesn't work!!!
+		const markdownContent = this.createMarkdownContent(subject.replace(/"/g, ''), publication.replace(/"/g, ''), from.replace(/" /g, ''), date, content);
 
 		await this.ensureFolderExists(this.settings.catchementFolder);
 
@@ -1012,12 +1142,12 @@ class CatchmentSettingTab extends PluginSettingTab {
 
 				// Add username display
 				const usernameSpan = authorItem.createSpan({
-				    text: author.username || author.display_name || 'Unknown',
-				    attr: { style: 'flex: 1; font-size: 14px; color: var(--text-normal);' }
+					text: author.username || author.display_name || 'Unknown',
+					attr: { style: 'flex: 1; font-size: 14px; color: var(--text-normal);' }
 				});
 				const npubSpan = authorItem.createSpan({
-				    text: this.truncatePubkey(author.npub),
-				    attr: { style: 'flex: 0 0 auto; font-family: monospace; font-size: 12px; margin-right: 8px;' }
+					text: this.truncatePubkey(author.npub),
+					attr: { style: 'flex: 0 0 auto; font-family: monospace; font-size: 12px; margin-right: 8px;' }
 				});
 						const removeButton = authorItem.createEl('button', {
 						text: '×',

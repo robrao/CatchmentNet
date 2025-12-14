@@ -1,9 +1,9 @@
 {
-	"id": "catchmentnet",
-	"name": "Catchment Net",
+	"id": "catchment",
+	"name": "Catchment",
 	"version": "1.0.0",
-	"minAppVersion": "0.15.0",
-	"description": "Sync Substack newsletters from Gmail into Obsidian notes",
+	"minAppVersion": "1.10.3",
+	"description": "Sync Substack and Nostr newsletters from Gmail into Obsidian notes",
 	"author": "Robby Rao",
 	"authorUrl": "https://github.com/robrao",
 	"fundingUrl": "https://buymeacoffee.com/prolixor",
