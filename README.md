@@ -1,16 +1,14 @@
 # Catchment Net
 
-A plugin that automatically syncs your Substack newsletter subscriptions from Gmail into Obsidian notes.
+A plugin that automatically pulls your Substack newsletters (from Gmail) and Nostr long form content into markdown notes.
 
 ## Features
 
-- 🔄 Automatic syncing of Substack newsletters from Gmail
-- 📧 OAuth2 authentication with Gmail API
+- 🔄 Automatic syncing of Substack newsletters from Gmail and Nostr longform content
 - 📝 Converts HTML newsletters to clean Markdown
 - 🏷️ Adds structured frontmatter with metadata
 - ⏰ Configurable auto-sync intervals
 - 📁 Organizes newsletters in designated folders
-- 🔍 Prevents duplicate imports
 
 ## Installation
 

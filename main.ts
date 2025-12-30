@@ -1,7 +1,7 @@
 // main.ts
 import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, TFolder } from 'obsidian';
-import { google } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library';
+import { google  } from 'googleapis';
+import { OAuth2Client, CodeChallengeMethod } from 'google-auth-library';
 import { assertPresent } from 'typeHelpers';
 import { convertHtmltoMarkdown } from 'markdownHelper';
 import { NoteModal } from 'noteModal';
@@ -25,7 +25,6 @@ export interface NostrAuthor {
 
 interface CatchementSettings {
 	client_id: string;
-	client_secret: string;
 	access_token: string;
 	catchementFolder: string;
 	maxEmails: number;
@@ -38,6 +37,9 @@ interface CatchementSettings {
 	expiry_date: number;
 	refresh_token_expiry: number;
 	last_refreshed_date: number;
+	// PKCE fields
+	pkce_verifier?: string;
+	pkce_state?: string;
 	// Nostr settings
 	nostrEnabled: boolean;
 	nostrRelays: Array<string>;
@@ -59,8 +61,7 @@ interface GmailTokens {
 }
 
 const DEFAULT_SETTINGS: CatchementSettings = {
-	client_id: '',
-	client_secret: '',
+	client_id: '',  // XXX: hard code client ID here...
 	access_token: '',
 	catchementFolder: 'Catchment',
 	maxEmails: 50,
@@ -108,6 +109,9 @@ export default class CatchementPlugin extends Plugin {
 	oAuth2Client: OAuth2Client | null = null;
 	gmail: any = null;
 	nostrClient: NostrNIP23Client | null = null;
+	// Track ongoing authorization
+	authorizationInProgress: boolean = false;
+	authorizationPromise: Promise<GmailTokens> | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -149,8 +153,8 @@ export default class CatchementPlugin extends Plugin {
 
 		//XXX: Development/Testing command - remove in production
 		this.addCommand({
-			id: 'test-oauth-reauth',
-			name: 'Test OAuth Re-authorization (Dev)',
+			id: 'testreauth',
+			name: 'TestReauth',
 			callback: async () => {
 				// Force token expiration
 				this.settings.expiry_date = Date.now() - 1000;
@@ -224,6 +228,9 @@ export default class CatchementPlugin extends Plugin {
 		if (this.nostrClient) {
 			this.nostrClient.disconnect();
 		}
+		// Reset authorization state
+		this.authorizationInProgress = false;
+		this.authorizationPromise = null;
 		server_.close()
 	}
 
@@ -282,6 +289,46 @@ export default class CatchementPlugin extends Plugin {
 		}
 
 		return sanitizedTitle
+	}
+
+	// PKCE helper methods using Web Crypto API
+	private generateRandomBytes(length: number): Uint8Array {
+		const array = new Uint8Array(length);
+		// Use Web Crypto API's getRandomValues
+		crypto.getRandomValues(array);
+		return array;
+	}
+
+	private base64URLEncode(buffer: ArrayBuffer | Uint8Array): string {
+		const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+		let binary = '';
+		bytes.forEach(byte => binary += String.fromCharCode(byte));
+
+		return btoa(binary)
+			.replace(/\+/g, '-')
+			.replace(/\//g, '_')
+			.replace(/=/g, '');
+	}
+
+	private generatePKCEVerifier(): string {
+		// Generate 64 random bytes and encode as base64url
+		const randomBytes = this.generateRandomBytes(64);
+		return this.base64URLEncode(randomBytes);
+	}
+
+	private async generatePKCEChallenge(verifier: string): Promise<string> {
+		// SHA256 hash of verifier, encoded as base64url
+		const encoder = new TextEncoder();
+		const data = encoder.encode(verifier);
+		// Use Web Crypto API's subtle.digest
+		const hash = await crypto.subtle.digest('SHA-256', data);
+		return this.base64URLEncode(hash);
+	}
+
+	private generateState(): string {
+		// Random state for CSRF protection
+		const randomBytes = this.generateRandomBytes(32);
+		return this.base64URLEncode(randomBytes);
 	}
 
 	async syncNostrArticles() {
@@ -482,23 +529,115 @@ tags: [nostr, article, longform]
 	}
 
 	async getNewTokens(): Promise<GmailTokens> {
+		// Check if authorization is already in progress
+		if (this.authorizationInProgress && this.authorizationPromise) {
+			console.log('Authorization already in progress, waiting for existing flow to complete');
+			return this.authorizationPromise;
+		}
+
+		// Set the authorization flag
+		this.authorizationInProgress = true;
+
+		// Create the authorization promise with timeout
+		const authPromise = this._performAuthorization();
+		
+		// Create a timeout promise (5 minutes timeout)
+		const timeoutPromise = new Promise<never>((_, reject) => {
+			setTimeout(() => {
+				reject(new Error('Authorization timeout - user may have closed the window'));
+			}, 5 * 60 * 1000); // 5 minutes
+		});
+
+		// Race between auth and timeout
+		this.authorizationPromise = Promise.race([authPromise, timeoutPromise]);
+
+		try {
+			const tokens = await this.authorizationPromise;
+			return tokens;
+		} catch (error) {
+			// If it's a timeout, close the server
+			if (error.message.includes('timeout') && server_.listening) {
+				console.log('Authorization timed out, closing server');
+				server_.close();
+			}
+			throw error;
+		} finally {
+			// Reset the authorization state
+			this.authorizationInProgress = false;
+			this.authorizationPromise = null;
+		}
+	}
+
+	private async _performAuthorization(): Promise<GmailTokens> {
+		// Generate PKCE values
+		const verifier = this.generatePKCEVerifier();
+		const challenge = await this.generatePKCEChallenge(verifier);
+		const state = this.generateState();
+
+		// Store PKCE values in settings temporarily
+		this.settings.pkce_verifier = verifier;
+		this.settings.pkce_state = state;
+		await this.saveSettings();
+
 		const authUrl = this.oAuth2Client.generateAuthUrl({
 			access_type: 'offline',
 			scope: this.settings.scopes,
-			prompt: 'consent'
+			prompt: 'consent',
+			state: state,
+			code_challenge: challenge,
+			code_challenge_method: CodeChallengeMethod.S256
 		})
 		const LISTEN_PORT = await this.getPortFromURI(this.settings.redirect_uris[0])
 
 		return new Promise((resolve, reject) => {
+			// Track if we've completed to prevent timeout from firing after success
+			let completed = false;
+
+			// Set up a timeout that will reject if no response is received
+			const authTimeout = setTimeout(() => {
+				if (!completed) {
+					console.log('Authorization timeout - no response received');
+					if (server_.listening) {
+						server_.close();
+					}
+					reject(new Error('Authorization timeout - no response received within 5 minutes'));
+				}
+			}, 5 * 60 * 1000); // 5 minutes
+
+			// Always close existing server before creating a new one
 			if (server_.listening) {
 				console.log("Server is listening on port, destroy before creating new one.")
 				server_.close()
 			}
+
 			server_ = http.createServer(async (req, res) => {
 				try {
 					if (req.url && req.url.indexOf('/oauth2callback') > -1) {
+						// Clear the timeout since we received a response
+						clearTimeout(authTimeout);
+						completed = true;
+
 						const qs = new url.URL(req.url, this.settings.redirect_uris[0]).searchParams;
-					
+						const code = qs.get('code');
+						const state = qs.get('state');
+
+						// Verify state to prevent CSRF
+						if (state !== this.settings.pkce_state) {
+							console.error('State mismatch - possible CSRF attack');
+							res.writeHead(400, {'Content-Type': 'text/html'});
+							res.end(`
+								<html>
+									<body>
+										<h1>Authentication Failed</h1>
+										<p>Invalid state parameter</p>
+									</body>
+								</html>
+							`);
+							server_.close();
+							reject(new Error("State mismatch"));
+							return;
+						}
+
 						// Check for OAuth error response
 						const error = qs.get("error");
 						if (error) {
@@ -526,14 +665,12 @@ tags: [nostr, article, longform]
 									</body>
 								</html>
 							`);
-							
+
 							server_.close();
 							reject(new Error(`OAuth failed: ${error} - ${errorDescription}`));
 							return;
 						}
-					
-						// Try to get the authorization code
-						const code = qs.get("code");
+
 						if (!code) {
 							// No code and no error - something went wrong
 							res.writeHead(200, {'Content-Type': 'text/html'});
@@ -555,9 +692,17 @@ tags: [nostr, article, longform]
 							return;
 						}
 					
-						// Success case - get tokens
-						const { tokens } = await this.oAuth2Client.getToken(code);
-						this.oAuth2Client.setCredentials(tokens);
+							// Success case - get tokens with PKCE verifier
+							const { tokens } = await this.oAuth2Client.getToken({
+								code: code as string,
+								codeVerifier: this.settings.pkce_verifier
+							});
+							this.oAuth2Client.setCredentials(tokens);
+
+							// Clean up PKCE values
+							delete this.settings.pkce_verifier;
+							delete this.settings.pkce_state;
+							await this.saveSettings();
 					
 						// Send success page that auto-closes
 						res.writeHead(200, {'Content-Type': 'text/html'});
@@ -618,6 +763,11 @@ tags: [nostr, article, longform]
 				window.open(authUrl, '_blank')
 			})
 			destroyer(server_)
+
+			// Clean up on promise settlement
+			this.authorizationPromise?.finally(() => {
+				clearTimeout(authTimeout);
+			});
 		})
 	}
 
@@ -638,9 +788,8 @@ tags: [nostr, article, longform]
 		if (!this.settings.access_token) {
 			try {
 				const credentials = await this.loadData()
-				const { client_secret, client_id, redirect_uris, access_token, refresh_token, refresh_token_expiry, expiryDate } = credentials.installed
+				const { client_id, redirect_uris, access_token, refresh_token, refresh_token_expiry, expiryDate } = credentials.installed
 				this.settings.client_id = client_id
-				this.settings.client_secret = client_secret
 				this.settings.redirect_uris = redirect_uris
 				this.settings.access_token = access_token
 				this.settings.refresh_token = refresh_token
@@ -653,11 +802,12 @@ tags: [nostr, article, longform]
 			}
 		}
 
-		if (this.settings.client_id && this.settings.client_secret && !this.oAuth2Client) {
+		if (this.settings.client_id && !this.oAuth2Client) {
 			try {
+				// Initialize OAuth2Client without client secret for PKCE flow
 				this.oAuth2Client = new google.auth.OAuth2(
 					this.settings.client_id,
-					this.settings.client_secret,
+					undefined, // No client secret for public clients using PKCE
 					this.settings.redirect_uris[0]
 				)
 			} catch (error) {
@@ -668,14 +818,23 @@ tags: [nostr, article, longform]
 		}
 
 		if (!this.settings.access_token || !this.settings.refresh_token || !notExpired) {
-			const tokens = await this.getNewTokens()
-			this.settings.access_token = tokens.access_token
-			this.settings.refresh_token = tokens.refresh_token
-			this.settings.expiry_date = tokens.expiry_date
-			this.settings.refresh_token_expires_in = tokens.refresh_token_expires_in * 1000
-			this.settings.last_refreshed_date = Date.now()
-			this.settings.refresh_token_expiry = this.settings.last_refreshed_date + this.settings.refresh_token_expires_in
-			await this.saveSettings()
+			try {
+				const tokens = await this.getNewTokens()
+				this.settings.access_token = tokens.access_token
+				this.settings.refresh_token = tokens.refresh_token
+				this.settings.expiry_date = tokens.expiry_date
+				this.settings.refresh_token_expires_in = tokens.refresh_token_expires_in * 1000
+				this.settings.last_refreshed_date = Date.now()
+				this.settings.refresh_token_expiry = this.settings.last_refreshed_date + this.settings.refresh_token_expires_in
+				await this.saveSettings()
+			} catch (error) {
+				if (error.message.includes('timeout')) {
+					console.error('Authorization timed out:', error);
+					new Notice('Authorization timed out. Please try syncing again.');
+					return false;
+				}
+				throw error;
+			}
 		}
 
 		this.oAuth2Client.setCredentials({
@@ -963,8 +1122,7 @@ class CatchmentSettingTab extends PluginSettingTab {
 		containerEl.createEl('h2', { text: 'Content Sync Settings' });
 
 		// Gmail Sync Settings
-		containerEl.createEl('h3', { text: 'Sync Configuration' });
-
+		containerEl.createEl('h3', { text: 'Aggregation Configuration' });
 		new Setting(containerEl)
 			.setName('Articles Folder')
 			.setDesc('Folder where substack and nostr articles will be saved')
@@ -975,6 +1133,9 @@ class CatchmentSettingTab extends PluginSettingTab {
 					this.plugin.settings.catchementFolder = value;
 					await this.plugin.saveSettings();
 				}));
+
+		// Gmail Sync Settings
+		containerEl.createEl('h3', { text: 'Sync Configuration' });
 
 		new Setting(containerEl)
 			.setName('Max Emails')
@@ -1150,7 +1311,7 @@ class CatchmentSettingTab extends PluginSettingTab {
 					attr: { style: 'flex: 0 0 auto; font-family: monospace; font-size: 12px; margin-right: 8px;' }
 				});
 						const removeButton = authorItem.createEl('button', {
-						text: '×',
+						text: 'x',
 						attr: {
 							style: 'margin-left: 8px; padding: 2px 6px; background: var(--interactive-accent); color: white; border: none; border-radius: 2px; cursor: pointer;',
 							title: 'Remove this author'
