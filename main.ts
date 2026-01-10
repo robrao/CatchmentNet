@@ -61,11 +61,11 @@ interface GmailTokens {
 }
 
 const DEFAULT_SETTINGS: CatchementSettings = {
-	client_id: '',  // XXX: hard code client ID here...
+    client_id: "549575793544-qfhpgtdqvkm4c204u6lln3hbdsnu64fn.apps.googleusercontent.com",
 	access_token: '',
 	catchementFolder: 'Catchment',
 	maxEmails: 50,
-	syncFrequency: 0,
+	syncFrequency: 120, // NOTE: default to two hours
 	scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
 	redirect_uris: [],
 	refresh_token: '',
@@ -83,8 +83,8 @@ const DEFAULT_SETTINGS: CatchementSettings = {
 		'wss://relay.nostr.band'
 	],
 	nostrFollowedAuthors: [],
-	nostrSyncFrequency: 30,
-	maxNostrQuery: 50,
+	nostrSyncFrequency: 120, // NOTE: default to two hours
+	maxNostrQuery: 100,
 	substackIcon: '',
 	nostrIcon: '',
 	filenameLength: 59
@@ -544,6 +544,7 @@ tags: [nostr, article, longform]
 		// Create a timeout promise (5 minutes timeout)
 		const timeoutPromise = new Promise<never>((_, reject) => {
 			setTimeout(() => {
+				this.closeOpenAuthTabs();
 				reject(new Error('Authorization timeout - user may have closed the window'));
 			}, 5 * 60 * 1000); // 5 minutes
 		});
@@ -568,7 +569,26 @@ tags: [nostr, article, longform]
 		}
 	}
 
+	private async closeOpenAuthTabs() {
+		const searchString = "accounts.google.com/v3/signin/accountchooser"
+		const workspace = this.app.workspace;
+
+		// 1. Find all existing tabs using the native 'webviewer' type
+		const existingLeaves = workspace.getLeavesOfType("webviewer");
+		// 2. Filter for leaves where the URL contains your search string
+		const matchingLeaves = existingLeaves.filter(leaf => {
+			const state = leaf.view.getState();
+			const currentUrl = state.url as string;
+			return currentUrl && currentUrl.includes(searchString);
+		});
+
+		// 3. Close all matching tabs
+		matchingLeaves.forEach(leaf => leaf.detach());
+	}
+
 	private async _performAuthorization(): Promise<GmailTokens> {
+		// close existing authorization tabs before start next auth process
+		await this.closeOpenAuthTabs();
 		// Generate PKCE values
 		const verifier = this.generatePKCEVerifier();
 		const challenge = await this.generatePKCEChallenge(verifier);
@@ -760,7 +780,7 @@ tags: [nostr, article, longform]
 			})
 
 			server_.listen(LISTEN_PORT, () => {
-				window.open(authUrl, '_blank')
+				window.open(authUrl, 'catchment-oauth-window')
 			})
 			destroyer(server_)
 
