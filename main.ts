@@ -50,6 +50,9 @@ interface CatchementSettings {
 	substackIcon: string;
 	nostrIcon: string;
 	filenameLength: number;
+	auth_uri: string;
+	token_uri: string;
+	auth_provider_x509_cert_url: string;
 }
 
 interface GmailTokens {
@@ -61,13 +64,15 @@ interface GmailTokens {
 }
 
 const DEFAULT_SETTINGS: CatchementSettings = {
-    client_id: "549575793544-qfhpgtdqvkm4c204u6lln3hbdsnu64fn.apps.googleusercontent.com",
-	access_token: '',
+    client_id: "116037380548-ac8rt3r3nb78ehqfj11gkn9i11jiu3eq.apps.googleusercontent.com",
+	access_token: null,
 	catchementFolder: 'Catchment',
 	maxEmails: 50,
 	syncFrequency: 120, // NOTE: default to two hours
 	scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
-	redirect_uris: [],
+	redirect_uris: [
+      "http://localhost:9999/oauth2callback"
+	],
 	refresh_token: '',
 	token_type: '',
 	refresh_token_expires_in: 0,
@@ -87,7 +92,10 @@ const DEFAULT_SETTINGS: CatchementSettings = {
 	maxNostrQuery: 100,
 	substackIcon: '',
 	nostrIcon: '',
-	filenameLength: 59
+	filenameLength: 59,
+	auth_uri: "https://accounts.google.com/o/oauth2/auth",
+	token_uri: "https://oauth2.googleapis.com/token",
+	auth_provider_x509_cert_url: "https://www.googleapis.com/oauth2/v1/certs",
 };
 
 interface GmailMessage {
@@ -540,7 +548,7 @@ tags: [nostr, article, longform]
 
 		// Create the authorization promise with timeout
 		const authPromise = this._performAuthorization();
-		
+
 		// Create a timeout promise (5 minutes timeout)
 		const timeoutPromise = new Promise<never>((_, reject) => {
 			setTimeout(() => {
