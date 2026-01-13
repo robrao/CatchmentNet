@@ -21,6 +21,7 @@ jobs:
 
       - name: Build plugin
         run: |
+          ls -la
           npm install
           npm run build
 
