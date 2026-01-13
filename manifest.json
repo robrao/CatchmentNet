@@ -1,7 +1,7 @@
 {
 	"id": "catchment",
 	"name": "Catchment",
-	"version": "0.9.0",
+	"version": "0.9.1",
 	"minAppVersion": "1.10.3",
 	"description": "Pull Substack newsletters from gmail and Nostr long form content into markdown notes.",
 	"author": "Robby Rao",
