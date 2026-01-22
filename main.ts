@@ -1,17 +1,26 @@
 // main.ts
-import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, TFolder } from 'obsidian';
-import { google  } from 'googleapis';
-import { OAuth2Client, CodeChallengeMethod } from 'google-auth-library';
-import { assertPresent } from 'typeHelpers';
+import { App, Plugin, PluginSettingTab, Setting, Notice, TFile, TFolder, Modal, Platform } from 'obsidian';
 import { convertHtmltoMarkdown } from 'markdownHelper';
 import { NoteModal } from 'noteModal';
 import { NostrNIP23Client } from './nostr';
 
-import * as http from 'http';
-import * as url from 'url';
-import destroyer from 'server-destroy'
+// Conditional imports for desktop-only modules
+let http: typeof import('http') | null = null;
+let url: typeof import('url') | null = null;
+let destroyer: ((server: any) => void) | null = null;
+let server_: any = null;
 
-let server_ = http.createServer()
+// Only load Node.js modules on desktop
+if (!Platform.isMobile) {
+	try {
+		http = require('http');
+		url = require('url');
+		destroyer = require('server-destroy');
+		server_ = http.createServer();
+	} catch (e) {
+		console.log('Node.js modules not available, running in mobile mode');
+	}
+}
 
 export interface NostrAuthor {
 	pubkey?: string;
@@ -31,6 +40,7 @@ interface CatchementSettings {
 	syncFrequency: number; // in minutes
 	scopes: Array<string>;
 	redirect_uris: Array<string>;
+	redirect_uri_mobile: string; // For mobile OOB flow
 	refresh_token: string;
 	token_type: string;
 	refresh_token_expires_in: number;
@@ -64,15 +74,16 @@ interface GmailTokens {
 }
 
 const DEFAULT_SETTINGS: CatchementSettings = {
-    client_id: "116037380548-ac8rt3r3nb78ehqfj11gkn9i11jiu3eq.apps.googleusercontent.com",
+	client_id: "116037380548-ac8rt3r3nb78ehqfj11gkn9i11jiu3eq.apps.googleusercontent.com",
 	access_token: null,
 	catchementFolder: 'Catchment',
 	maxEmails: 50,
 	syncFrequency: 120, // NOTE: default to two hours
 	scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
 	redirect_uris: [
-      "http://localhost:9999/oauth2callback"
+		"http://localhost:9999/oauth2callback"
 	],
+	redirect_uri_mobile: "urn:ietf:wg:oauth:2.0:oob", // Out-of-band for mobile manual code entry
 	refresh_token: '',
 	token_type: '',
 	refresh_token_expires_in: 0,
@@ -110,12 +121,86 @@ interface GmailMessage {
 	labelIds: Array<string>;
 }
 
+// Modal for manual OAuth code entry on mobile
+class OAuthCodeEntryModal extends Modal {
+	private onSubmit: (code: string) => void;
+	private authUrl: string;
+
+	constructor(app: App, authUrl: string, onSubmit: (code: string) => void) {
+		super(app);
+		this.authUrl = authUrl;
+		this.onSubmit = onSubmit;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+
+		contentEl.createEl('h2', { text: 'Google Authentication' });
+
+		contentEl.createEl('p', {
+			text: 'To authenticate with Gmail, please follow these steps:'
+		});
+
+		const steps = contentEl.createEl('ol');
+		steps.createEl('li', { text: 'Tap the button below to open Google sign-in' });
+		steps.createEl('li', { text: 'Sign in with your Google account' });
+		steps.createEl('li', { text: 'Grant permission to read your emails' });
+		steps.createEl('li', { text: 'Copy the authorization code shown' });
+		steps.createEl('li', { text: 'Paste the code below and tap Submit' });
+
+		// Open auth URL button
+		const openButton = contentEl.createEl('button', {
+			text: 'Open Google Sign-In',
+			cls: 'mod-cta'
+		});
+		openButton.style.marginBottom = '16px';
+		openButton.style.width = '100%';
+		openButton.onclick = () => {
+			window.open(this.authUrl);
+		};
+
+		// Code input
+		contentEl.createEl('p', { text: 'Paste authorization code here:' });
+		const codeInput = contentEl.createEl('input', {
+			type: 'text',
+			placeholder: 'Paste code here...',
+			attr: { style: 'width: 100%; padding: 8px; margin-bottom: 16px;' }
+		});
+
+		// Submit button
+		const submitButton = contentEl.createEl('button', {
+			text: 'Submit Code',
+			cls: 'mod-cta'
+		});
+		submitButton.style.width = '100%';
+		submitButton.onclick = () => {
+			const code = codeInput.value.trim();
+			if (code) {
+				this.onSubmit(code);
+				this.close();
+			} else {
+				new Notice('Please enter the authorization code');
+			}
+		};
+
+		// Cancel button
+		const cancelButton = contentEl.createEl('button', { text: 'Cancel' });
+		cancelButton.style.width = '100%';
+		cancelButton.style.marginTop = '8px';
+		cancelButton.onclick = () => this.close();
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+}
+
 export default class CatchementPlugin extends Plugin {
 	settings: CatchementSettings;
 	syncInterval: number | null = null;
 	nostrSyncInterval: number | null = null;
-	oAuth2Client: OAuth2Client | null = null;
-	gmail: any = null;
 	nostrClient: NostrNIP23Client | null = null;
 	// Track ongoing authorization
 	authorizationInProgress: boolean = false;
@@ -123,7 +208,6 @@ export default class CatchementPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
-		this.initializeGoogleAuth();
 
 		if (this.settings.nostrEnabled) {
 			this.initializeNostr();
@@ -168,9 +252,9 @@ export default class CatchementPlugin extends Plugin {
 				this.settings.expiry_date = Date.now() - 1000;
 				this.settings.refresh_token_expiry = Date.now() - 1000;
 				await this.saveSettings();
-				
+
 				new Notice('Tokens expired, triggering reauthorization...');
-				
+
 				// Trigger sync which will cause reauth
 				setTimeout(() => {
 					this.syncNewsletters();
@@ -210,7 +294,7 @@ export default class CatchementPlugin extends Plugin {
 
 	createNote(editor: any, view: any) {
 		const selectedText = editor.getSelection();
-		
+
 		if (!selectedText || selectedText.trim().length === 0) {
 			new Notice('Please select some text to extract');
 			return;
@@ -239,7 +323,9 @@ export default class CatchementPlugin extends Plugin {
 		// Reset authorization state
 		this.authorizationInProgress = false;
 		this.authorizationPromise = null;
-		server_.close()
+		if (server_ && !Platform.isMobile) {
+			server_.close();
+		}
 	}
 
 	async loadSettings() {
@@ -247,10 +333,8 @@ export default class CatchementPlugin extends Plugin {
 	}
 
 	async saveSettings() {
-		// XXX: debug
 		console.log(`Save Settings...`)
 		await this.saveData(this.settings);
-		this.initializeGoogleAuth(); // Reinitialize auth when settings change
 
 		// Reinitialize Nostr if settings changed
 		if (this.settings.nostrEnabled) {
@@ -292,17 +376,16 @@ export default class CatchementPlugin extends Plugin {
 		let sanitizedTitle = name.replace(/[<>:"/\\|?*]/g, '-').trim();
 
 		// NOTE: assuming obsidian filename allows 62 characters
-		if (sanitizedTitle.length > this.settings.filenameLength+3) {
+		if (sanitizedTitle.length > this.settings.filenameLength + 3) {
 			sanitizedTitle = sanitizedTitle.slice(0, this.settings.filenameLength) + '...';
 		}
 
 		return sanitizedTitle
 	}
 
-	// PKCE helper methods using Web Crypto API
+	// PKCE helper methods using Web Crypto API (works on both desktop and mobile)
 	private generateRandomBytes(length: number): Uint8Array {
 		const array = new Uint8Array(length);
-		// Use Web Crypto API's getRandomValues
 		crypto.getRandomValues(array);
 		return array;
 	}
@@ -319,22 +402,18 @@ export default class CatchementPlugin extends Plugin {
 	}
 
 	private generatePKCEVerifier(): string {
-		// Generate 64 random bytes and encode as base64url
 		const randomBytes = this.generateRandomBytes(64);
 		return this.base64URLEncode(randomBytes);
 	}
 
 	private async generatePKCEChallenge(verifier: string): Promise<string> {
-		// SHA256 hash of verifier, encoded as base64url
 		const encoder = new TextEncoder();
 		const data = encoder.encode(verifier);
-		// Use Web Crypto API's subtle.digest
 		const hash = await crypto.subtle.digest('SHA-256', data);
 		return this.base64URLEncode(hash);
 	}
 
 	private generateState(): string {
-		// Random state for CSRF protection
 		const randomBytes = this.generateRandomBytes(32);
 		return this.base64URLEncode(randomBytes);
 	}
@@ -378,18 +457,10 @@ export default class CatchementPlugin extends Plugin {
 
 			let processedCount = 0;
 
-			// NOTE; use lasy sync time if available, otherwise query up to limit
 			const sinceDate = this.settings.nostrLastSyncTime
 				? new Date(this.settings.nostrLastSyncTime * 1000)
 				: undefined
 
-
-			// NOTE: may want to do something like this if a lot of time has passed
-			// increase the limit, but this as is doesn't really make sense
-
-			// If we have a last sync time, we might want to increase the limit
-			// to ensure we get all new articles
-			// const queryLimit = sinceDate ? 50 : 10;
 			const queryLimit = this.settings.maxNostrQuery
 
 			this.nostrClient.getNostrData(30023, this.settings.nostrFollowedAuthors, queryLimit, (article) => {
@@ -407,7 +478,6 @@ export default class CatchementPlugin extends Plugin {
 			this.settings.nostrLastSyncTime = Math.floor(Date.now() / 1000);
 			await this.saveSettings();
 
-			// Show result after a delay to allow processing
 			setTimeout(() => {
 				new Notice(`Processed ${processedCount} new Nostr articles`);
 			}, 7000);
@@ -422,23 +492,18 @@ export default class CatchementPlugin extends Plugin {
 		try {
 			const title = article.parsed.title || 'Untitled Article';
 
-			// Create a safe filename
 			const sanitizedTitle = await this.formatFilename(title)
 			const filename = `${sanitizedTitle}`
 
-			// Check if file already exists
 			if (existingFiles.has(filename)) {
 				return false;
 			}
 
-			// Create markdown content
 			const markdownContent = this.createNostrMarkdownContent(article);
 
-			// Create the file
 			const filePath = `${this.settings.catchementFolder}/${filename}.md`;
 			await this.app.vault.create(filePath, markdownContent);
 
-			// Add to existing files set to prevent duplicates in current session
 			existingFiles.add(filename);
 
 			return true;
@@ -475,10 +540,8 @@ tags: [nostr, article, longform]
 
 		let content = frontmatter;
 
-		// Add title
 		content += `# ${title}\n\n`;
 
-		// Add metadata
 		content += `**Author:** ${author.username}\n`;
 		content += `**Published:** ${publishedDate}\n`;
 
@@ -492,10 +555,8 @@ tags: [nostr, article, longform]
 
 		content += '\n---\n\n';
 
-		// Add the article content
 		content += article.content;
 
-		// Add references if any
 		if (references.length > 0) {
 			content += '\n\n## References\n\n';
 			references.forEach((ref: string, index: number) => {
@@ -511,12 +572,10 @@ tags: [nostr, article, longform]
 
 		const promises = [];
 
-		// Sync Gmail if configured
 		if (this.settings.access_token) {
 			promises.push(this.syncNewsletters());
 		}
 
-		// Sync Nostr if enabled
 		if (this.settings.nostrEnabled) {
 			promises.push(this.syncNostrArticles());
 		}
@@ -530,110 +589,149 @@ tags: [nostr, article, longform]
 		}
 	}
 
-	// Existing Gmail methods remain the same...
-	async getPortFromURI(uri: string): Promise<number> {
-		const match = uri.match(/:([0-9]+)/m) || [];
-		return Number(match[1])
+	// ============================================
+	// OAUTH AND GMAIL API - CROSS-PLATFORM IMPLEMENTATION
+	// ============================================
+
+	private getRedirectUri(): string {
+		// On mobile, we use a special redirect that shows the code to the user
+		// Google's OOB redirect is deprecated, so we use a redirect that will show the code
+		if (Platform.isMobile) {
+			return this.settings.redirect_uri_mobile;
+		}
+		return this.settings.redirect_uris[0];
+	}
+
+	private buildAuthUrl(verifier: string, state: string): string {
+		const params = new URLSearchParams({
+			client_id: this.settings.client_id,
+			redirect_uri: this.getRedirectUri(),
+			response_type: 'code',
+			scope: this.settings.scopes.join(' '),
+			access_type: 'offline',
+			prompt: 'consent',
+			state: state,
+			code_challenge: '', // Will be set below
+			code_challenge_method: 'S256'
+		});
+
+		return `${this.settings.auth_uri}?${params.toString()}`;
 	}
 
 	async getNewTokens(): Promise<GmailTokens> {
-		// Check if authorization is already in progress
 		if (this.authorizationInProgress && this.authorizationPromise) {
 			console.log('Authorization already in progress, waiting for existing flow to complete');
 			return this.authorizationPromise;
 		}
 
-		// Set the authorization flag
 		this.authorizationInProgress = true;
 
-		// Create the authorization promise with timeout
-		const authPromise = this._performAuthorization();
-
-		// Create a timeout promise (5 minutes timeout)
-		const timeoutPromise = new Promise<never>((_, reject) => {
-			setTimeout(() => {
-				this.closeOpenAuthTabs();
-				reject(new Error('Authorization timeout - user may have closed the window'));
-			}, 5 * 60 * 1000); // 5 minutes
-		});
-
-		// Race between auth and timeout
-		this.authorizationPromise = Promise.race([authPromise, timeoutPromise]);
-
 		try {
+			if (Platform.isMobile) {
+				this.authorizationPromise = this._performMobileAuthorization();
+			} else {
+				this.authorizationPromise = this._performDesktopAuthorization();
+			}
+
 			const tokens = await this.authorizationPromise;
 			return tokens;
-		} catch (error) {
-			// If it's a timeout, close the server
-			if (error.message.includes('timeout') && server_.listening) {
-				console.log('Authorization timed out, closing server');
-				server_.close();
-			}
-			throw error;
 		} finally {
-			// Reset the authorization state
 			this.authorizationInProgress = false;
 			this.authorizationPromise = null;
 		}
 	}
 
-	private async closeOpenAuthTabs() {
-		const searchString = "accounts.google.com/v3/signin/accountchooser"
-		const workspace = this.app.workspace;
-
-		// 1. Find all existing tabs using the native 'webviewer' type
-		const existingLeaves = workspace.getLeavesOfType("webviewer");
-		// 2. Filter for leaves where the URL contains your search string
-		const matchingLeaves = existingLeaves.filter(leaf => {
-			const state = leaf.view.getState();
-			const currentUrl = state.url as string;
-			return currentUrl && currentUrl.includes(searchString);
-		});
-
-		// 3. Close all matching tabs
-		matchingLeaves.forEach(leaf => leaf.detach());
-	}
-
-	private async _performAuthorization(): Promise<GmailTokens> {
-		// close existing authorization tabs before start next auth process
-		await this.closeOpenAuthTabs();
-		// Generate PKCE values
+	// Mobile authorization flow with manual code entry
+	private async _performMobileAuthorization(): Promise<GmailTokens> {
 		const verifier = this.generatePKCEVerifier();
 		const challenge = await this.generatePKCEChallenge(verifier);
 		const state = this.generateState();
 
-		// Store PKCE values in settings temporarily
 		this.settings.pkce_verifier = verifier;
 		this.settings.pkce_state = state;
 		await this.saveSettings();
 
-		const authUrl = this.oAuth2Client.generateAuthUrl({
+		// Build the auth URL with PKCE challenge
+		const params = new URLSearchParams({
+			client_id: this.settings.client_id,
+			redirect_uri: this.getRedirectUri(),
+			response_type: 'code',
+			scope: this.settings.scopes.join(' '),
 			access_type: 'offline',
-			scope: this.settings.scopes,
 			prompt: 'consent',
 			state: state,
 			code_challenge: challenge,
-			code_challenge_method: CodeChallengeMethod.S256
-		})
-		const LISTEN_PORT = await this.getPortFromURI(this.settings.redirect_uris[0])
+			code_challenge_method: 'S256'
+		});
+
+		const authUrl = `${this.settings.auth_uri}?${params.toString()}`;
 
 		return new Promise((resolve, reject) => {
-			// Track if we've completed to prevent timeout from firing after success
+			const modal = new OAuthCodeEntryModal(this.app, authUrl, async (code: string) => {
+				try {
+					const tokens = await this.exchangeCodeForTokens(code, verifier);
+					
+					// Clean up PKCE values
+					delete this.settings.pkce_verifier;
+					delete this.settings.pkce_state;
+					await this.saveSettings();
+
+					resolve(tokens);
+				} catch (error) {
+					reject(error);
+				}
+			});
+
+			modal.open();
+		});
+	}
+
+	// Desktop authorization flow with local HTTP server
+	private async _performDesktopAuthorization(): Promise<GmailTokens> {
+		if (!http || !url || !destroyer) {
+			throw new Error('Desktop authorization requires Node.js modules');
+		}
+
+		await this.closeOpenAuthTabs();
+
+		const verifier = this.generatePKCEVerifier();
+		const challenge = await this.generatePKCEChallenge(verifier);
+		const state = this.generateState();
+
+		this.settings.pkce_verifier = verifier;
+		this.settings.pkce_state = state;
+		await this.saveSettings();
+
+		// Build the auth URL with PKCE challenge
+		const params = new URLSearchParams({
+			client_id: this.settings.client_id,
+			redirect_uri: this.getRedirectUri(),
+			response_type: 'code',
+			scope: this.settings.scopes.join(' '),
+			access_type: 'offline',
+			prompt: 'consent',
+			state: state,
+			code_challenge: challenge,
+			code_challenge_method: 'S256'
+		});
+
+		const authUrl = `${this.settings.auth_uri}?${params.toString()}`;
+		const LISTEN_PORT = this.getPortFromURI(this.settings.redirect_uris[0]);
+
+		return new Promise((resolve, reject) => {
 			let completed = false;
 
-			// Set up a timeout that will reject if no response is received
 			const authTimeout = setTimeout(() => {
 				if (!completed) {
 					console.log('Authorization timeout - no response received');
-					if (server_.listening) {
+					if (server_?.listening) {
 						server_.close();
 					}
 					reject(new Error('Authorization timeout - no response received within 5 minutes'));
 				}
-			}, 5 * 60 * 1000); // 5 minutes
+			}, 5 * 60 * 1000);
 
-			// Always close existing server before creating a new one
-			if (server_.listening) {
+			if (server_?.listening) {
 				console.log("Server is listening on port, destroy before creating new one.")
 				server_.close()
 			}
@@ -641,18 +739,16 @@ tags: [nostr, article, longform]
 			server_ = http.createServer(async (req, res) => {
 				try {
 					if (req.url && req.url.indexOf('/oauth2callback') > -1) {
-						// Clear the timeout since we received a response
 						clearTimeout(authTimeout);
 						completed = true;
 
 						const qs = new url.URL(req.url, this.settings.redirect_uris[0]).searchParams;
 						const code = qs.get('code');
-						const state = qs.get('state');
+						const returnedState = qs.get('state');
 
-						// Verify state to prevent CSRF
-						if (state !== this.settings.pkce_state) {
+						if (returnedState !== this.settings.pkce_state) {
 							console.error('State mismatch - possible CSRF attack');
-							res.writeHead(400, {'Content-Type': 'text/html'});
+							res.writeHead(400, { 'Content-Type': 'text/html' });
 							res.end(`
 								<html>
 									<body>
@@ -666,185 +762,167 @@ tags: [nostr, article, longform]
 							return;
 						}
 
-						// Check for OAuth error response
 						const error = qs.get("error");
 						if (error) {
-							console.log(`OAuth error: ${error}`);
 							const errorDescription = qs.get("error_description") || "Unknown error";
-						
-							// Send error page that auto-closes
-							res.writeHead(200, {'Content-Type': 'text/html'});
+							res.writeHead(200, { 'Content-Type': 'text/html' });
 							res.end(`
 								<html>
-									<head>
-										<style>
-											body { font-family: Arial, sans-serif; padding: 40px; text-align: center; }
-											.error { color: #d73a49; }
-										</style>
-									</head>
 									<body>
-										<h1 class="error">Authentication Failed</h1>
+										<h1 style="color: #d73a49;">Authentication Failed</h1>
 										<p>Error: ${error}</p>
 										<p>${errorDescription}</p>
-										<p>This window will close in 3 seconds...</p>
-										<script>
-											setTimeout(() => window.close(), 3000);
-										</script>
+										<script>setTimeout(() => window.close(), 3000);</script>
 									</body>
 								</html>
 							`);
-
 							server_.close();
 							reject(new Error(`OAuth failed: ${error} - ${errorDescription}`));
 							return;
 						}
 
 						if (!code) {
-							// No code and no error - something went wrong
-							res.writeHead(200, {'Content-Type': 'text/html'});
+							res.writeHead(200, { 'Content-Type': 'text/html' });
 							res.end(`
 								<html>
 									<body>
 										<h1 style="color: #d73a49;">Authentication Failed</h1>
 										<p>No authorization code received.</p>
-										<p>This window will close in 3 seconds...</p>
-										<script>
-											setTimeout(() => window.close(), 3000);
-										</script>
+										<script>setTimeout(() => window.close(), 3000);</script>
 									</body>
 								</html>
 							`);
-							
 							server_.close();
 							reject(new Error("No authorization code received"));
 							return;
 						}
-					
-							// Success case - get tokens with PKCE verifier
-							const { tokens } = await this.oAuth2Client.getToken({
-								code: code as string,
-								codeVerifier: this.settings.pkce_verifier
-							});
-							this.oAuth2Client.setCredentials(tokens);
+
+						try {
+							const tokens = await this.exchangeCodeForTokens(code, this.settings.pkce_verifier);
 
 							// Clean up PKCE values
 							delete this.settings.pkce_verifier;
 							delete this.settings.pkce_state;
 							await this.saveSettings();
-					
-						// Send success page that auto-closes
-						res.writeHead(200, {'Content-Type': 'text/html'});
-						res.end(`
-							<html>
-								<head>
-									<style>
-										body { font-family: Arial, sans-serif; padding: 40px; text-align: center; }
-										.success { color: #28a745; }
-									</style>
-								</head>
-								<body>
-									<h1 class="success">Authentication Successful!</h1>
-									<p>You can now use the Gmail sync feature.</p>
-									<p>This window will close automatically...</p>
-									<script>
-										window.close();
-										// Fallback if window.close() doesn't work
-										setTimeout(() => {
-											document.body.innerHTML = '<p>You can now close this window.</p>';
-										}, 1000);
-									</script>
-								</body>
-							</html>
-						`);
-						
-						server_.close();
-						resolve(tokens as any);
+
+							res.writeHead(200, { 'Content-Type': 'text/html' });
+							res.end(`
+								<html>
+									<body>
+										<h1 style="color: #28a745;">Authentication Successful!</h1>
+										<p>You can now use the Gmail sync feature.</p>
+										<script>window.close();</script>
+									</body>
+								</html>
+							`);
+							server_.close();
+							resolve(tokens);
+						} catch (tokenError) {
+							res.writeHead(200, { 'Content-Type': 'text/html' });
+							res.end(`
+								<html>
+									<body>
+										<h1 style="color: #d73a49;">Token Exchange Failed</h1>
+										<p>${tokenError.message}</p>
+										<script>setTimeout(() => window.close(), 3000);</script>
+									</body>
+								</html>
+							`);
+							server_.close();
+							reject(tokenError);
+						}
 					}
 				} catch (err) {
 					console.log(`Error in OAuth callback: ${JSON.stringify(err)}`);
-				
-					// Send error response even for unexpected errors
-					try {
-						res.writeHead(200, {'Content-Type': 'text/html'});
-						res.end(`
-							<html>
-								<body>
-									<h1 style="color: #d73a49;">Authentication Error</h1>
-									<p>An unexpected error occurred. Please try again.</p>
-									<p>This window will close in 3 seconds...</p>
-									<script>
-										setTimeout(() => window.close(), 3000);
-									</script>
-								</body>
-							</html>
-						`);
-					} catch (e) {
-						// If we can't even send a response, just log it
-						console.error('Failed to send error response:', e);
-					}
-
 					reject(err);
 				}
-			})
+			});
 
 			server_.listen(LISTEN_PORT, () => {
-				window.open(authUrl, 'catchment-oauth-window')
-			})
-			destroyer(server_)
-
-			// Clean up on promise settlement
-			this.authorizationPromise?.finally(() => {
-				clearTimeout(authTimeout);
+				window.open(authUrl, 'catchment-oauth-window');
 			});
-		})
+
+			if (destroyer) {
+				destroyer(server_);
+			}
+		});
 	}
 
-	async initializeGoogleAuth() {
+	// Exchange authorization code for tokens using fetch (works on all platforms)
+	private async exchangeCodeForTokens(code: string, verifier: string): Promise<GmailTokens> {
+		const params = new URLSearchParams({
+			client_id: this.settings.client_id,
+			code: code,
+			code_verifier: verifier,
+			grant_type: 'authorization_code',
+			redirect_uri: this.getRedirectUri()
+		});
+
+		const response = await fetch(this.settings.token_uri, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded'
+			},
+			body: params.toString()
+		});
+
+		if (!response.ok) {
+			const errorData = await response.json();
+			throw new Error(`Token exchange failed: ${errorData.error_description || errorData.error}`);
+		}
+
+		const tokenData = await response.json();
+
+		return {
+			access_token: tokenData.access_token,
+			refresh_token: tokenData.refresh_token,
+			token_type: tokenData.token_type,
+			refresh_token_expires_in: tokenData.expires_in || 3600,
+			expiry_date: Date.now() + (tokenData.expires_in || 3600) * 1000
+		};
+	}
+
+	private getPortFromURI(uri: string): number {
+		const match = uri.match(/:([0-9]+)/m) || [];
+		return Number(match[1])
+	}
+
+	private async closeOpenAuthTabs() {
+		if (Platform.isMobile) return;
+
+		const searchString = "accounts.google.com/v3/signin/accountchooser"
+		const workspace = this.app.workspace;
+
+		const existingLeaves = workspace.getLeavesOfType("webviewer");
+		const matchingLeaves = existingLeaves.filter(leaf => {
+			const state = leaf.view.getState();
+			const currentUrl = state.url as string;
+			return currentUrl && currentUrl.includes(searchString);
+		});
+
+		matchingLeaves.forEach(leaf => leaf.detach());
+	}
+
+	async initializeGoogleAuth(): Promise<boolean> {
 		const currentDate = Date.now()
 		const expiryDate = this.settings.refresh_token_expiry
 		const notExpired = expiryDate > currentDate
-		const isInitialized = typeof this.oAuth2Client?.credentials?.refresh_token === "string"
+		const hasValidToken = this.settings.access_token && this.settings.refresh_token && notExpired
 
-		if (isInitialized && notExpired) {
+		if (hasValidToken) {
 			return true
 		}
 
-		if (!notExpired) {
+		if (!notExpired && this.settings.refresh_token) {
 			console.log(`Token is expired: ${expiryDate} < ${currentDate}`)
-		}
-
-		if (!this.settings.access_token) {
-			try {
-				const credentials = await this.loadData()
-				const { client_id, redirect_uris, access_token, refresh_token, refresh_token_expiry, expiryDate } = credentials.installed
-				this.settings.client_id = client_id
-				this.settings.redirect_uris = redirect_uris
-				this.settings.access_token = access_token
-				this.settings.refresh_token = refresh_token
-				this.settings.refresh_token_expiry = refresh_token_expiry
-				this.settings.expiry_date = expiryDate
-			} catch (error) {
-				console.error('Failed to retreive credentials:', error);
-				new Notice('Failed to retreieve credentials')
-				return false
+			// Try to refresh the token
+			const refreshed = await this.refreshAccessToken();
+			if (refreshed) {
+				return true;
 			}
 		}
 
-		if (this.settings.client_id && !this.oAuth2Client) {
-			try {
-				// Initialize OAuth2Client without client secret for PKCE flow
-				this.oAuth2Client = new google.auth.OAuth2(
-					this.settings.client_id,
-					undefined, // No client secret for public clients using PKCE
-					this.settings.redirect_uris[0]
-				)
-			} catch (error) {
-				console.error('Failed to initialize Google Authorization:', error);
-				new Notice('Failed to intialize Google Authorization')
-				return false
-			}
-		}
-
+		// Need to get new tokens
 		if (!this.settings.access_token || !this.settings.refresh_token || !notExpired) {
 			try {
 				const tokens = await this.getNewTokens()
@@ -855,23 +933,19 @@ tags: [nostr, article, longform]
 				this.settings.last_refreshed_date = Date.now()
 				this.settings.refresh_token_expiry = this.settings.last_refreshed_date + this.settings.refresh_token_expires_in
 				await this.saveSettings()
+				return true
 			} catch (error) {
 				if (error.message.includes('timeout')) {
 					console.error('Authorization timed out:', error);
 					new Notice('Authorization timed out. Please try syncing again.');
 					return false;
 				}
-				throw error;
+				console.error('Failed to get tokens:', error);
+				new Notice('Failed to authenticate with Google');
+				return false;
 			}
 		}
 
-		this.oAuth2Client.setCredentials({
-			access_token: this.settings.access_token,
-			refresh_token: this.settings.refresh_token,
-			expiry_date: this.settings.expiry_date,
-		});
-
-		this.gmail = google.gmail({ version: 'v1', auth: this.oAuth2Client });
 		return true
 	}
 
@@ -879,7 +953,7 @@ tags: [nostr, article, longform]
 		if (this.syncInterval) {
 			window.clearInterval(this.syncInterval);
 		}
-		
+
 		if (this.settings.syncFrequency > 0) {
 			this.syncInterval = window.setInterval(() => {
 				this.syncNewsletters();
@@ -889,65 +963,68 @@ tags: [nostr, article, longform]
 
 	async refreshAccessToken(): Promise<boolean> {
 		console.log(`Refreshing Token...`)
-		if (!this.oAuth2Client) {
-			new Notice('Refresh failed: OAuth client not initialized. Please configure credentials.');
+
+		if (!this.settings.refresh_token) {
+			new Notice('No refresh token available. Please re-authenticate.');
 			return false;
 		}
 
 		try {
-			const { credentials } = await this.oAuth2Client.refreshAccessToken();
-			console.log(`DEBUG Credentials refreshed: ${JSON.stringify(credentials)}`)
-			if (credentials.access_token) {
-				this.settings.access_token = credentials.access_token;
-				await this.saveSettings();
-				return true;
+			const params = new URLSearchParams({
+				client_id: this.settings.client_id,
+				refresh_token: this.settings.refresh_token,
+				grant_type: 'refresh_token'
+			});
+
+			const response = await fetch(this.settings.token_uri, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/x-www-form-urlencoded'
+				},
+				body: params.toString()
+			});
+
+			if (!response.ok) {
+				const errorData = await response.json();
+				console.error('Token refresh failed:', errorData);
+				// If refresh token is invalid, clear it and require re-auth
+				if (errorData.error === 'invalid_grant') {
+					this.settings.refresh_token = '';
+					this.settings.access_token = '';
+					await this.saveSettings();
+					new Notice('Session expired. Please re-authenticate.');
+				}
+				return false;
 			}
+
+			const tokenData = await response.json();
+			this.settings.access_token = tokenData.access_token;
+			this.settings.expiry_date = Date.now() + (tokenData.expires_in || 3600) * 1000;
+			await this.saveSettings();
+
+			console.log('Token refreshed successfully');
+			return true;
 		} catch (error) {
 			console.error('Failed to refresh access token:', error);
-			try {
-				console.log(`Reinitizaling...`)
-				this.initializeGoogleAuth()
-				return true;
-			} catch {
-				console.error(`Failed to re-Initialize Google Auth`)
-				new Notice('Unable to authenticate access with Gmail.')
-			}
+			return false;
 		}
-		return false;
 	}
 
+	// Gmail API methods using fetch (cross-platform)
 	async listGmailMessages(params: any = {}): Promise<any> {
-		if (!this.gmail) {
-			// XXX: debug
-			console.log(`listGmailMessages Initializing Gmail`)
-			await this.initializeGoogleAuth()
-			console.log(`ListingGmail Complete`)
+		const authInitialized = await this.initializeGoogleAuth();
+		if (!authInitialized) {
+			return null;
 		}
 
 		try {
-			const response = await this.gmail.users.messages.list({
-				userId: 'me',
-				...params
-			});
-			return response.data;
+			return await this._fetchGmailMessages(params);
 		} catch (error: any) {
-			const resp_err = error.response.data.error
-			if (resp_err === 'invalid_grant') {
-				// XXX: debug
-				console.log(`ListGmailRefreshToken initiating.`)
+			if (error.status === 401) {
+				console.log('Token expired, refreshing...');
 				if (await this.refreshAccessToken()) {
-					try {
-						const retryResponse = await this.gmail.users.messages.list({
-							userId: 'me',
-							...params
-						});
-						return retryResponse.data;
-					} catch (retryError) {
-						console.error('Retry failed:', retryError);
-						return null;
-					}
+					return await this._fetchGmailMessages(params);
 				}
-				return null;
 			}
 			console.error('Gmail API request failed:', error);
 			new Notice('Failed to fetch emails from Gmail');
@@ -955,30 +1032,42 @@ tags: [nostr, article, longform]
 		}
 	}
 
+	private async _fetchGmailMessages(params: any = {}): Promise<any> {
+		const queryParams = new URLSearchParams();
+		if (params.q) queryParams.set('q', params.q);
+		if (params.maxResults) queryParams.set('maxResults', params.maxResults.toString());
+		if (params.pageToken) queryParams.set('pageToken', params.pageToken);
+
+		const response = await fetch(
+			`https://gmail.googleapis.com/gmail/v1/users/me/messages?${queryParams.toString()}`,
+			{
+				headers: {
+					'Authorization': `Bearer ${this.settings.access_token}`,
+					'Accept': 'application/json'
+				}
+			}
+		);
+
+		if (!response.ok) {
+			const error = new Error(`Gmail API error: ${response.status}`);
+			(error as any).status = response.status;
+			throw error;
+		}
+
+		return await response.json();
+	}
+
 	async getGmailMessage(messageId: string): Promise<any> {
-		if (!this.gmail) {
+		if (!this.settings.access_token) {
 			return null;
 		}
 
 		try {
-			const response = await this.gmail.users.messages.get({
-				userId: 'me',
-				id: messageId,
-				format: 'full'
-			});
-			return response.data;
+			return await this._fetchGmailMessage(messageId);
 		} catch (error: any) {
-			if (error.code === 401 && await this.refreshAccessToken()) {
-				try {
-					const retryResponse = await this.gmail.users.messages.get({
-						userId: 'me',
-						id: messageId,
-						format: 'full'
-					});
-					return retryResponse.data;
-				} catch (retryError) {
-					console.error('Retry failed:', retryError);
-					return null;
+			if (error.status === 401) {
+				if (await this.refreshAccessToken()) {
+					return await this._fetchGmailMessage(messageId);
 				}
 			}
 			console.error('Failed to get Gmail message:', error);
@@ -986,8 +1075,28 @@ tags: [nostr, article, longform]
 		}
 	}
 
+	private async _fetchGmailMessage(messageId: string): Promise<any> {
+		const response = await fetch(
+			`https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}?format=full`,
+			{
+				headers: {
+					'Authorization': `Bearer ${this.settings.access_token}`,
+					'Accept': 'application/json'
+				}
+			}
+		);
+
+		if (!response.ok) {
+			const error = new Error(`Gmail API error: ${response.status}`);
+			(error as any).status = response.status;
+			throw error;
+		}
+
+		return await response.json();
+	}
+
 	async syncNewsletters() {
-		if (!this.settings.access_token) {
+		if (!this.settings.access_token && !this.settings.refresh_token) {
 			new Notice('Please configure Gmail authentication in settings first.');
 			return;
 		}
@@ -997,9 +1106,9 @@ tags: [nostr, article, longform]
 		try {
 			const query = 'from:substack.com AND -from:no-reply@substack.com AND -label:CATEGORY_PROMOTION AND -replyto:no-reply@substack.com';
 			const messagesResponse = await this.listGmailMessages({
-					q: query,
-					maxResults: this.settings.maxEmails
-				});
+				q: query,
+				maxResults: this.settings.maxEmails
+			});
 
 			if (!messagesResponse || !messagesResponse.messages) {
 				new Notice('No Substack newsletters found');
@@ -1064,8 +1173,13 @@ tags: [nostr, article, longform]
 			content = message.snippet || 'No content available';
 		}
 
-		// XXX: replace on author still doesn't work!!!
-		const markdownContent = this.createMarkdownContent(subject.replace(/"/g, ''), publication.replace(/"/g, ''), from.replace(/" /g, ''), date, content);
+		const markdownContent = this.createMarkdownContent(
+			subject.replace(/"/g, ''),
+			publication.replace(/"/g, ''),
+			from.replace(/" /g, ''),
+			date,
+			content
+		);
 
 		await this.ensureFolderExists(this.settings.catchementFolder);
 
@@ -1133,9 +1247,9 @@ class CatchmentSettingTab extends PluginSettingTab {
 	plugin: CatchementPlugin;
 
 	nostrClient = new NostrNIP23Client([
-			"wss://relay.damus.io",
-			"wss://nos.lol",
-			"wss://relay.snort.social"
+		"wss://relay.damus.io",
+		"wss://nos.lol",
+		"wss://relay.snort.social"
 	])
 
 	constructor(app: App, plugin: CatchementPlugin) {
@@ -1149,6 +1263,14 @@ class CatchmentSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h2', { text: 'Content Sync Settings' });
 
+		// Show platform info
+		if (Platform.isMobile) {
+			containerEl.createEl('div', {
+				text: '📱 Running on mobile - using manual code entry for authentication',
+				attr: { style: 'background: var(--background-secondary); padding: 8px; border-radius: 4px; margin-bottom: 16px;' }
+			});
+		}
+
 		// Gmail Sync Settings
 		containerEl.createEl('h3', { text: 'Aggregation Configuration' });
 		new Setting(containerEl)
@@ -1160,6 +1282,37 @@ class CatchmentSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.catchementFolder = value;
 					await this.plugin.saveSettings();
+				}));
+
+		// Gmail Authentication Status
+		containerEl.createEl('h3', { text: 'Gmail Authentication' });
+
+		const authStatus = this.plugin.settings.access_token ? 'Connected' : 'Not connected';
+		const authStatusEl = containerEl.createEl('div', {
+			text: `Status: ${authStatus}`,
+			attr: { style: 'margin-bottom: 8px;' }
+		});
+
+		if (this.plugin.settings.access_token) {
+			authStatusEl.style.color = 'var(--text-success)';
+		} else {
+			authStatusEl.style.color = 'var(--text-error)';
+		}
+
+		new Setting(containerEl)
+			.setName('Authenticate with Gmail')
+			.setDesc('Connect your Gmail account to sync Substack newsletters')
+			.addButton(button => button
+				.setButtonText(this.plugin.settings.access_token ? 'Re-authenticate' : 'Connect Gmail')
+				.setCta()
+				.onClick(async () => {
+					try {
+						await this.plugin.initializeGoogleAuth();
+						this.display(); // Refresh to show updated status
+					} catch (error) {
+						console.error('Authentication failed:', error);
+						new Notice('Authentication failed. Please try again.');
+					}
 				}));
 
 		// Gmail Sync Settings
@@ -1209,7 +1362,7 @@ class CatchmentSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.nostrEnabled = value;
 					await this.plugin.saveSettings();
-					this.display(); // Refresh to show/hide Nostr settings
+					this.display();
 				}));
 
 		if (this.plugin.settings.nostrEnabled) {
@@ -1236,8 +1389,6 @@ class CatchmentSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					}));
 
-
-			// Nostr Relays
 			containerEl.createEl('h4', { text: 'Nostr Relays' });
 			containerEl.createEl('p', {
 				text: 'Add or remove Nostr relays (one per line). These are the servers that will be queried for articles.',
@@ -1262,14 +1413,12 @@ class CatchmentSettingTab extends PluginSettingTab {
 						});
 				});
 
-			// Add pubkey helper
 			containerEl.createEl('div', {
 				text: '💡 Tip: You can paste npub1... format or hex pubkeys. The plugin will handle both formats.',
 				cls: 'setting-item-description',
 				attr: { style: 'margin-top: 8px; font-style: italic; color: var(--text-muted);' }
 			});
 
-			// Quick add author section
 			const quickAddContainer = containerEl.createDiv({ cls: 'setting-item' });
 			quickAddContainer.createEl('div', {
 				text: 'Quick Add Author',
@@ -1300,7 +1449,7 @@ class CatchmentSettingTab extends PluginSettingTab {
 					const nostrAuthor = {
 						npub: npub,
 					}
-					const metadata = await this.nostrClient.getNostrData(0, [nostrAuthor], 1, () => {})
+					const metadata = await this.nostrClient.getNostrData(0, [nostrAuthor], 1, () => { })
 
 					this.plugin.settings.nostrFollowedAuthors.push({
 						pubkey: metadata.pubkey,
@@ -1311,7 +1460,7 @@ class CatchmentSettingTab extends PluginSettingTab {
 					});
 					await this.plugin.saveSettings();
 					quickAddInput.value = '';
-					this.display(); // Refresh to show updated list
+					this.display();
 					new Notice('Author added successfully!');
 				} else if (!npub) {
 					new Notice('Please enter a valid npub');
@@ -1320,7 +1469,6 @@ class CatchmentSettingTab extends PluginSettingTab {
 				}
 			};
 
-			// Current followed authors display
 			if (this.plugin.settings.nostrFollowedAuthors.length > 0) {
 				containerEl.createEl('h5', { text: 'Currently Following:' });
 				const followedList = containerEl.createEl('div', { cls: 'nostr-followed-list' });
@@ -1329,16 +1477,15 @@ class CatchmentSettingTab extends PluginSettingTab {
 					const authorItem = followedList.createDiv({ cls: 'nostr-author-item' });
 					authorItem.style.cssText = 'display: flex; align-items: center; margin: 4px 0; padding: 8px; background: var(--background-secondary); border-radius: 4px;';
 
-				// Add username display
-				const usernameSpan = authorItem.createSpan({
-					text: author.username || author.display_name || 'Unknown',
-					attr: { style: 'flex: 1; font-size: 14px; color: var(--text-normal);' }
-				});
-				const npubSpan = authorItem.createSpan({
-					text: this.truncatePubkey(author.npub),
-					attr: { style: 'flex: 0 0 auto; font-family: monospace; font-size: 12px; margin-right: 8px;' }
-				});
-						const removeButton = authorItem.createEl('button', {
+					const usernameSpan = authorItem.createSpan({
+						text: author.username || author.display_name || 'Unknown',
+						attr: { style: 'flex: 1; font-size: 14px; color: var(--text-normal);' }
+					});
+					const npubSpan = authorItem.createSpan({
+						text: this.truncatePubkey(author.npub),
+						attr: { style: 'flex: 0 0 auto; font-family: monospace; font-size: 12px; margin-right: 8px;' }
+					});
+					const removeButton = authorItem.createEl('button', {
 						text: 'x',
 						attr: {
 							style: 'margin-left: 8px; padding: 2px 6px; background: var(--interactive-accent); color: white; border: none; border-radius: 2px; cursor: pointer;',
@@ -1392,17 +1539,13 @@ class CatchmentSettingTab extends PluginSettingTab {
 				}));
 	}
 
-	// Helper method to clean and validate pubkeys
 	cleanPubkey(pubkey: string): string {
 		if (!pubkey) return '';
 
 		pubkey = pubkey.trim();
 
-		// Handle npub format (bech32)
 		if (pubkey.startsWith('npub1')) {
 			try {
-				// You might want to add bech32 decoding here
-				// For now, we'll store the npub format and handle conversion in the Nostr client
 				return pubkey;
 			} catch (error) {
 				console.error('Invalid npub format:', error);
@@ -1410,12 +1553,10 @@ class CatchmentSettingTab extends PluginSettingTab {
 			}
 		}
 
-		// Handle hex format
 		if (/^[a-fA-F0-9]{64}$/.test(pubkey)) {
 			return pubkey.toLowerCase();
 		}
 
-		// If it's not recognizable format, try to clean it
 		const cleaned = pubkey.replace(/[^a-fA-F0-9npub]/g, '');
 		if (cleaned.startsWith('npub1') && cleaned.length > 60) {
 			return cleaned;
@@ -1423,11 +1564,10 @@ class CatchmentSettingTab extends PluginSettingTab {
 		if (/^[a-fA-F0-9]{64}$/.test(cleaned)) {
 			return cleaned.toLowerCase();
 		}
-		
+
 		return '';
 	}
 
-	// Helper method to truncate pubkeys for display
 	truncatePubkey(pubkey: string): string {
 		if (pubkey.startsWith('npub1')) {
 			return pubkey.length > 20 ? `${pubkey.substring(0, 16)}...` : pubkey;
