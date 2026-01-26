@@ -40,7 +40,7 @@ interface CatchementSettings {
 	syncFrequency: number; // in minutes
 	scopes: Array<string>;
 	redirect_uris: Array<string>;
-	redirect_uri_mobile: string; // For mobile OOB flow
+	redirect_uri_mobile: string; // For mobile OAuth via Obsidian URI scheme
 	refresh_token: string;
 	token_type: string;
 	refresh_token_expires_in: number;
@@ -74,7 +74,8 @@ interface GmailTokens {
 }
 
 const DEFAULT_SETTINGS: CatchementSettings = {
-	client_id: "116037380548-ac8rt3r3nb78ehqfj11gkn9i11jiu3eq.apps.googleusercontent.com",
+	// client_id: "116037380548-ac8rt3r3nb78ehqfj11gkn9i11jiu3eq.apps.googleusercontent.com", // UWP
+	client_id: "116037380548-t8au61erg75pc4n1e9h2jrmoo4h5lk0s.apps.googleusercontent.com", // Web
 	access_token: null,
 	catchementFolder: 'Catchment',
 	maxEmails: 50,
@@ -83,7 +84,10 @@ const DEFAULT_SETTINGS: CatchementSettings = {
 	redirect_uris: [
 		"http://localhost:9999/oauth2callback"
 	],
-	redirect_uri_mobile: "urn:ietf:wg:oauth:2.0:oob", // Out-of-band for mobile manual code entry
+	// Mobile uses a hosted redirect page that forwards to obsidian:// URI
+	// Host oauth-redirect.html on GitHub Pages and update this URL
+	// Then register this URL in Google Cloud Console as an authorized redirect URI
+	redirect_uri_mobile: "https://robrao.github.io/CatchmentNet/oauth-redirect.html",
 	refresh_token: '',
 	token_type: '',
 	refresh_token_expires_in: 0,
@@ -121,74 +125,154 @@ interface GmailMessage {
 	labelIds: Array<string>;
 }
 
-// Modal for manual OAuth code entry on mobile
-class OAuthCodeEntryModal extends Modal {
-	private onSubmit: (code: string) => void;
-	private authUrl: string;
+// Modal shown while waiting for OAuth callback on mobile (with manual fallback)
+class MobileOAuthWaitingModal extends Modal {
+	private onCancel: () => void;
+	private onManualCode: (code: string) => void;
+	private showManualEntry: boolean = false;
 
-	constructor(app: App, authUrl: string, onSubmit: (code: string) => void) {
+	constructor(app: App, onCancel: () => void, onManualCode: (code: string) => void) {
 		super(app);
-		this.authUrl = authUrl;
-		this.onSubmit = onSubmit;
+		this.onCancel = onCancel;
+		this.onManualCode = onManualCode;
 	}
 
 	onOpen() {
 		const { contentEl } = this;
+		this.render();
+	}
+
+	private render() {
+		const { contentEl } = this;
 		contentEl.empty();
 
-		contentEl.createEl('h2', { text: 'Google Authentication' });
+		if (!this.showManualEntry) {
+			// Waiting state
+			contentEl.createEl('h2', { text: 'Authenticating with Google...' });
 
-		contentEl.createEl('p', {
-			text: 'To authenticate with Gmail, please follow these steps:'
-		});
+			contentEl.createEl('p', {
+				text: 'A browser window should have opened for Google sign-in.'
+			});
 
-		const steps = contentEl.createEl('ol');
-		steps.createEl('li', { text: 'Tap the button below to open Google sign-in' });
-		steps.createEl('li', { text: 'Sign in with your Google account' });
-		steps.createEl('li', { text: 'Grant permission to read your emails' });
-		steps.createEl('li', { text: 'Copy the authorization code shown' });
-		steps.createEl('li', { text: 'Paste the code below and tap Submit' });
+			contentEl.createEl('p', {
+				text: 'After you grant permission, you should be automatically redirected back to Obsidian.',
+				attr: { style: 'color: var(--text-muted);' }
+			});
 
-		// Open auth URL button
-		const openButton = contentEl.createEl('button', {
-			text: 'Open Google Sign-In',
-			cls: 'mod-cta'
-		});
-		openButton.style.marginBottom = '16px';
-		openButton.style.width = '100%';
-		openButton.onclick = () => {
-			window.open(this.authUrl);
-		};
+			// Spinner/loading indicator
+			const loadingContainer = contentEl.createDiv({
+				attr: { style: 'text-align: center; margin: 20px 0;' }
+			});
+			loadingContainer.createEl('div', {
+				text: '⏳ Waiting for authentication...',
+				attr: { style: 'font-size: 1.2em;' }
+			});
 
-		// Code input
-		contentEl.createEl('p', { text: 'Paste authorization code here:' });
-		const codeInput = contentEl.createEl('input', {
-			type: 'text',
-			placeholder: 'Paste code here...',
-			attr: { style: 'width: 100%; padding: 8px; margin-bottom: 16px;' }
-		});
+			// Manual entry link
+			const manualLink = contentEl.createEl('p', {
+				attr: { style: 'margin-top: 20px; text-align: center;' }
+			});
+			const link = manualLink.createEl('a', {
+				text: "Redirect didn't work? Enter code manually",
+				attr: { href: '#', style: 'color: var(--text-accent);' }
+			});
+			link.onclick = (e) => {
+				e.preventDefault();
+				this.showManualEntry = true;
+				this.render();
+			};
 
-		// Submit button
-		const submitButton = contentEl.createEl('button', {
-			text: 'Submit Code',
-			cls: 'mod-cta'
-		});
-		submitButton.style.width = '100%';
-		submitButton.onclick = () => {
-			const code = codeInput.value.trim();
-			if (code) {
-				this.onSubmit(code);
+			// Cancel button
+			const cancelButton = contentEl.createEl('button', { 
+				text: 'Cancel',
+				attr: { style: 'width: 100%; margin-top: 20px;' }
+			});
+			cancelButton.onclick = () => {
+				this.onCancel();
 				this.close();
-			} else {
-				new Notice('Please enter the authorization code');
-			}
-		};
+			};
+		} else {
+			// Manual code entry state
+			contentEl.createEl('h2', { text: 'Enter Authorization Code' });
 
-		// Cancel button
-		const cancelButton = contentEl.createEl('button', { text: 'Cancel' });
-		cancelButton.style.width = '100%';
-		cancelButton.style.marginTop = '8px';
-		cancelButton.onclick = () => this.close();
+			contentEl.createEl('p', {
+				text: 'If the automatic redirect didn\'t work, you can enter the code manually:'
+			});
+
+			const steps = contentEl.createEl('ol', {
+				attr: { style: 'margin: 16px 0; padding-left: 20px;' }
+			});
+			steps.createEl('li', { text: 'Complete the Google sign-in in your browser' });
+			steps.createEl('li', { text: 'After granting permission, you\'ll see a page with your code' });
+			steps.createEl('li', { text: 'Copy the code and paste it below' });
+
+			// Code input
+			const inputContainer = contentEl.createDiv({
+				attr: { style: 'margin: 16px 0;' }
+			});
+			const codeInput = inputContainer.createEl('input', {
+				type: 'text',
+				placeholder: 'Paste authorization code here...',
+				attr: { style: 'width: 100%; padding: 12px; font-size: 14px; border-radius: 4px; border: 1px solid var(--background-modifier-border);' }
+			});
+
+			// Help text
+			contentEl.createEl('p', {
+				text: 'The code looks like: 4/0AQSTgQ...',
+				attr: { style: 'font-size: 12px; color: var(--text-muted); margin-bottom: 16px;' }
+			});
+
+			// Submit button
+			const submitButton = contentEl.createEl('button', {
+				text: 'Submit Code',
+				cls: 'mod-cta',
+				attr: { style: 'width: 100%;' }
+			});
+			submitButton.onclick = () => {
+				let code = codeInput.value.trim();
+				
+				// Try to extract code if user pasted the full URL
+				if (code.includes('code=')) {
+					const match = code.match(/code=([^&]+)/);
+					if (match) {
+						code = decodeURIComponent(match[1]);
+					}
+				}
+				
+				if (code) {
+					this.onManualCode(code);
+					this.close();
+				} else {
+					new Notice('Please enter the authorization code');
+				}
+			};
+
+			// Back button
+			const backButton = contentEl.createEl('button', { 
+				text: '← Back to waiting',
+				attr: { style: 'width: 100%; margin-top: 8px;' }
+			});
+			backButton.onclick = () => {
+				this.showManualEntry = false;
+				this.render();
+			};
+
+			// Cancel button
+			const cancelButton = contentEl.createEl('button', { 
+				text: 'Cancel',
+				attr: { style: 'width: 100%; margin-top: 8px;' }
+			});
+			cancelButton.onclick = () => {
+				this.onCancel();
+				this.close();
+			};
+		}
+	}
+
+	// Method to switch to manual entry from outside
+	showManualEntryView() {
+		this.showManualEntry = true;
+		this.render();
 	}
 
 	onClose() {
@@ -205,9 +289,19 @@ export default class CatchementPlugin extends Plugin {
 	// Track ongoing authorization
 	authorizationInProgress: boolean = false;
 	authorizationPromise: Promise<GmailTokens> | null = null;
+	// Mobile OAuth promise resolver - called by the protocol handler
+	private mobileAuthResolver: ((tokens: GmailTokens) => void) | null = null;
+	private mobileAuthRejecter: ((error: Error) => void) | null = null;
+	private mobileAuthModal: MobileOAuthWaitingModal | null = null;
 
 	async onload() {
 		await this.loadSettings();
+
+		// Register Obsidian protocol handler for OAuth callback (works on mobile)
+		this.registerObsidianProtocolHandler('catchment-oauth-callback', async (params) => {
+			console.log('OAuth callback received:', params);
+			await this.handleOAuthCallback(params);
+		});
 
 		if (this.settings.nostrEnabled) {
 			this.initializeNostr();
@@ -292,6 +386,88 @@ export default class CatchementPlugin extends Plugin {
 		);
 	}
 
+	/**
+	 * Handle OAuth callback from Obsidian protocol handler
+	 * This is called when Google redirects back to obsidian://catchment-oauth-callback
+	 */
+	private async handleOAuthCallback(params: any) {
+		console.log('Processing OAuth callback...');
+
+		// Close the waiting modal if it's open
+		if (this.mobileAuthModal) {
+			this.mobileAuthModal.close();
+			this.mobileAuthModal = null;
+		}
+
+		// Check for errors from Google
+		if (params.error) {
+			const errorMsg = params.error_description || params.error;
+			console.error('OAuth error:', errorMsg);
+			new Notice(`Authentication failed: ${errorMsg}`);
+			
+			if (this.mobileAuthRejecter) {
+				this.mobileAuthRejecter(new Error(errorMsg));
+				this.mobileAuthRejecter = null;
+				this.mobileAuthResolver = null;
+			}
+			return;
+		}
+
+		// Validate state to prevent CSRF
+		if (params.state !== this.settings.pkce_state) {
+			console.error('State mismatch - possible CSRF attack');
+			new Notice('Authentication failed: Security validation failed');
+			
+			if (this.mobileAuthRejecter) {
+				this.mobileAuthRejecter(new Error('State mismatch'));
+				this.mobileAuthRejecter = null;
+				this.mobileAuthResolver = null;
+			}
+			return;
+		}
+
+		// Check for authorization code
+		if (!params.code) {
+			console.error('No authorization code received');
+			new Notice('Authentication failed: No authorization code received');
+			
+			if (this.mobileAuthRejecter) {
+				this.mobileAuthRejecter(new Error('No authorization code'));
+				this.mobileAuthRejecter = null;
+				this.mobileAuthResolver = null;
+			}
+			return;
+		}
+
+		try {
+			// Exchange code for tokens
+			const tokens = await this.exchangeCodeForTokens(params.code, this.settings.pkce_verifier);
+
+			// Clean up PKCE values
+			delete this.settings.pkce_verifier;
+			delete this.settings.pkce_state;
+			await this.saveSettings();
+
+			new Notice('Successfully authenticated with Gmail!');
+
+			// Resolve the pending promise
+			if (this.mobileAuthResolver) {
+				this.mobileAuthResolver(tokens);
+				this.mobileAuthResolver = null;
+				this.mobileAuthRejecter = null;
+			}
+		} catch (error) {
+			console.error('Token exchange failed:', error);
+			new Notice(`Authentication failed: ${error.message}`);
+			
+			if (this.mobileAuthRejecter) {
+				this.mobileAuthRejecter(error);
+				this.mobileAuthRejecter = null;
+				this.mobileAuthResolver = null;
+			}
+		}
+	}
+
 	createNote(editor: any, view: any) {
 		const selectedText = editor.getSelection();
 
@@ -323,6 +499,12 @@ export default class CatchementPlugin extends Plugin {
 		// Reset authorization state
 		this.authorizationInProgress = false;
 		this.authorizationPromise = null;
+		this.mobileAuthResolver = null;
+		this.mobileAuthRejecter = null;
+		if (this.mobileAuthModal) {
+			this.mobileAuthModal.close();
+			this.mobileAuthModal = null;
+		}
 		if (server_ && !Platform.isMobile) {
 			server_.close();
 		}
@@ -384,9 +566,28 @@ export default class CatchementPlugin extends Plugin {
 	}
 
 	// PKCE helper methods using Web Crypto API (works on both desktop and mobile)
+	// Explicitly use globalThis.crypto to avoid Node.js crypto module being bundled
+	private getWebCrypto(): Crypto {
+		// Use globalThis.crypto which works in both browser and modern Node.js
+		// This avoids any import of the Node.js 'crypto' module
+		if (typeof globalThis !== 'undefined' && globalThis.crypto) {
+			console.log(`Using globalThis for crypto package`)
+			return globalThis.crypto;
+		}
+		if (typeof window !== 'undefined' && window.crypto) {
+			console.log(`Using window.crypto for crypto package`)
+			return window.crypto;
+		}
+		if (typeof self !== 'undefined' && self.crypto) {
+			console.log(`Using self.crypto for crypto package`)
+			return self.crypto;
+		}
+		throw new Error('Web Crypto API not available');
+	}
+
 	private generateRandomBytes(length: number): Uint8Array {
 		const array = new Uint8Array(length);
-		crypto.getRandomValues(array);
+		this.getWebCrypto().getRandomValues(array);
 		return array;
 	}
 
@@ -409,7 +610,8 @@ export default class CatchementPlugin extends Plugin {
 	private async generatePKCEChallenge(verifier: string): Promise<string> {
 		const encoder = new TextEncoder();
 		const data = encoder.encode(verifier);
-		const hash = await crypto.subtle.digest('SHA-256', data);
+		const webCrypto = this.getWebCrypto();
+		const hash = await webCrypto.subtle.digest('SHA-256', data);
 		return this.base64URLEncode(hash);
 	}
 
@@ -572,9 +774,10 @@ tags: [nostr, article, longform]
 
 		const promises = [];
 
-		if (this.settings.access_token) {
+		// DEBUG
+		// if (this.settings.access_token) {
 			promises.push(this.syncNewsletters());
-		}
+		// }
 
 		if (this.settings.nostrEnabled) {
 			promises.push(this.syncNostrArticles());
@@ -594,8 +797,7 @@ tags: [nostr, article, longform]
 	// ============================================
 
 	private getRedirectUri(): string {
-		// On mobile, we use a special redirect that shows the code to the user
-		// Google's OOB redirect is deprecated, so we use a redirect that will show the code
+		// On mobile, use Obsidian URI scheme for seamless callback
 		if (Platform.isMobile) {
 			return this.settings.redirect_uri_mobile;
 		}
@@ -619,10 +821,14 @@ tags: [nostr, article, longform]
 	}
 
 	async getNewTokens(): Promise<GmailTokens> {
+		// DEBUG
+		console.log(`GET TOKENS AUTH`)
 		if (this.authorizationInProgress && this.authorizationPromise) {
 			console.log('Authorization already in progress, waiting for existing flow to complete');
 			return this.authorizationPromise;
 		}
+		// DEBUG
+		console.log(`GET TOKENS AUTH 2`)
 
 		this.authorizationInProgress = true;
 
@@ -641,7 +847,7 @@ tags: [nostr, article, longform]
 		}
 	}
 
-	// Mobile authorization flow with manual code entry
+	// Mobile authorization flow using hosted redirect page + Obsidian URI scheme
 	private async _performMobileAuthorization(): Promise<GmailTokens> {
 		const verifier = this.generatePKCEVerifier();
 		const challenge = await this.generatePKCEChallenge(verifier);
@@ -665,9 +871,43 @@ tags: [nostr, article, longform]
 		});
 
 		const authUrl = `${this.settings.auth_uri}?${params.toString()}`;
+		console.log(`GOOGLE AUTH URL MOBILE: ${authUrl}`)
 
 		return new Promise((resolve, reject) => {
-			const modal = new OAuthCodeEntryModal(this.app, authUrl, async (code: string) => {
+			// Store the resolver/rejecter so the protocol handler can use them
+			this.mobileAuthResolver = resolve;
+			this.mobileAuthRejecter = reject;
+
+			// Set up a timeout
+			const authTimeout = setTimeout(() => {
+				if (this.mobileAuthResolver) {
+					new Notice('Authentication timed out. Please try again.');
+					this.mobileAuthRejecter(new Error('Authentication timeout'));
+					this.mobileAuthResolver = null;
+					this.mobileAuthRejecter = null;
+					if (this.mobileAuthModal) {
+						this.mobileAuthModal.close();
+						this.mobileAuthModal = null;
+					}
+				}
+			}, 5 * 60 * 1000); // 5 minute timeout
+
+			// Clean up timeout when resolved/rejected
+			const originalResolve = this.mobileAuthResolver;
+			const originalReject = this.mobileAuthRejecter;
+			
+			this.mobileAuthResolver = (tokens) => {
+				clearTimeout(authTimeout);
+				originalResolve(tokens);
+			};
+			
+			this.mobileAuthRejecter = (error) => {
+				clearTimeout(authTimeout);
+				originalReject(error);
+			};
+
+			// Handler for manual code entry
+			const handleManualCode = async (code: string) => {
 				try {
 					const tokens = await this.exchangeCodeForTokens(code, verifier);
 					
@@ -676,13 +916,44 @@ tags: [nostr, article, longform]
 					delete this.settings.pkce_state;
 					await this.saveSettings();
 
-					resolve(tokens);
+					new Notice('Successfully authenticated with Gmail!');
+					
+					if (this.mobileAuthResolver) {
+						this.mobileAuthResolver(tokens);
+						this.mobileAuthResolver = null;
+						this.mobileAuthRejecter = null;
+					}
 				} catch (error) {
-					reject(error);
+					console.error('Token exchange failed:', error);
+					new Notice(`Authentication failed: ${error.message}`);
+					
+					if (this.mobileAuthRejecter) {
+						this.mobileAuthRejecter(error);
+						this.mobileAuthResolver = null;
+						this.mobileAuthRejecter = null;
+					}
 				}
-			});
+			};
 
-			modal.open();
+			// Show the waiting modal with manual code fallback
+			this.mobileAuthModal = new MobileOAuthWaitingModal(
+				this.app, 
+				() => {
+					// User cancelled
+					if (this.mobileAuthRejecter) {
+						this.mobileAuthRejecter(new Error('User cancelled authentication'));
+						this.mobileAuthResolver = null;
+						this.mobileAuthRejecter = null;
+					}
+				},
+				handleManualCode
+			);
+			this.mobileAuthModal.open();
+
+			// Open the auth URL in the system browser
+			// On mobile, this will open in Safari/Chrome, then redirect to the hosted page,
+			// which will then redirect back to Obsidian via obsidian:// URI
+			window.open(authUrl);
 		});
 	}
 
@@ -940,6 +1211,10 @@ tags: [nostr, article, longform]
 					new Notice('Authorization timed out. Please try syncing again.');
 					return false;
 				}
+				if (error.message.includes('cancelled')) {
+					console.log('Authorization cancelled by user');
+					return false;
+				}
 				console.error('Failed to get tokens:', error);
 				new Notice('Failed to authenticate with Google');
 				return false;
@@ -1012,7 +1287,11 @@ tags: [nostr, article, longform]
 
 	// Gmail API methods using fetch (cross-platform)
 	async listGmailMessages(params: any = {}): Promise<any> {
+		// DEBUG
+		console.log(`LIST GMAIL MESSAGES INIT AUTH NEXT`)
 		const authInitialized = await this.initializeGoogleAuth();
+		// DEBUG
+		console.log(`LIST GMAIL MESSAGES INIT AUTH DONE`)
 		if (!authInitialized) {
 			return null;
 		}
@@ -1096,11 +1375,15 @@ tags: [nostr, article, longform]
 	}
 
 	async syncNewsletters() {
-		if (!this.settings.access_token && !this.settings.refresh_token) {
-			new Notice('Please configure Gmail authentication in settings first.');
-			return;
-		}
+		// // DEBUG
+		// console.log(`Sync Newletters`)
+		// if (!this.settings.access_token && !this.settings.refresh_token) {
+		// 	new Notice('Please configure Gmail authentication in settings first.');
+		// 	return;
+		// }
 
+		// // DEBUG
+		// console.log(`Second Sync Newletters`)
 		new Notice('Syncing Substack newsletters...');
 
 		try {
@@ -1266,7 +1549,7 @@ class CatchmentSettingTab extends PluginSettingTab {
 		// Show platform info
 		if (Platform.isMobile) {
 			containerEl.createEl('div', {
-				text: '📱 Running on mobile - using manual code entry for authentication',
+				text: '📱 Running on mobile - using Obsidian URI scheme for seamless authentication',
 				attr: { style: 'background: var(--background-secondary); padding: 8px; border-radius: 4px; margin-bottom: 16px;' }
 			});
 		}

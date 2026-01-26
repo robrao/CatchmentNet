@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Catchment - OAuth Redirect</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            color: #e0e0e0;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        .logo {
+            font-size: 48px;
+            margin-bottom: 20px;
+        }
+        h1 {
+            font-size: 24px;
+            margin-bottom: 16px;
+            color: #fff;
+        }
+        .status {
+            padding: 16px;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        .status.success {
+            background: rgba(40, 167, 69, 0.2);
+            border: 1px solid rgba(40, 167, 69, 0.5);
+        }
+        .status.error {
+            background: rgba(220, 53, 69, 0.2);
+            border: 1px solid rgba(220, 53, 69, 0.5);
+        }
+        .status.waiting {
+            background: rgba(0, 123, 255, 0.2);
+            border: 1px solid rgba(0, 123, 255, 0.5);
+        }
+        .spinner {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s ease-in-out infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .button {
+            display: inline-block;
+            background: #7c3aed;
+            color: white;
+            padding: 14px 28px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: 600;
+            margin-top: 20px;
+            transition: background 0.2s;
+        }
+        .button:hover {
+            background: #6d28d9;
+        }
+        .button.secondary {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        .button.secondary:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .code-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 16px;
+            margin: 16px 0;
+            font-family: monospace;
+            font-size: 14px;
+            word-break: break-all;
+            text-align: left;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        .copy-button {
+            background: #7c3aed;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+        .copy-button:hover {
+            background: #6d28d9;
+        }
+        .instructions {
+            text-align: left;
+            margin-top: 20px;
+            padding: 16px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+        }
+        .instructions ol {
+            margin-left: 20px;
+        }
+        .instructions li {
+            margin: 8px 0;
+        }
+        .hidden {
+            display: none;
+        }
+        p {
+            line-height: 1.6;
+            color: #b0b0b0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">🎣</div>
+        <h1>Catchment OAuth</h1>
+        
+        <!-- Waiting state -->
+        <div id="waiting" class="hidden">
+            <div class="status waiting">
+                <span class="spinner"></span>
+                Processing authentication...
+            </div>
+            <p>Please wait while we redirect you back to Obsidian.</p>
+        </div>
+
+        <!-- Success state - auto redirect -->
+        <div id="success" class="hidden">
+            <div class="status success">
+                ✓ Authentication successful!
+            </div>
+            <p>Redirecting you back to Obsidian...</p>
+            <a id="manual-redirect" href="#" class="button">
+                Open Obsidian Manually
+            </a>
+            <p style="margin-top: 16px; font-size: 14px;">
+                If you're not redirected automatically, tap the button above.
+            </p>
+        </div>
+
+        <!-- Error state -->
+        <div id="error" class="hidden">
+            <div class="status error">
+                ✗ Authentication failed
+            </div>
+            <p id="error-message"></p>
+            <a href="#" onclick="window.close()" class="button secondary">Close Window</a>
+        </div>
+
+        <!-- Manual code entry fallback -->
+        <div id="manual" class="hidden">
+            <div class="status waiting">
+                Manual Code Entry Required
+            </div>
+            <p>The automatic redirect didn't work. Please copy the code below and paste it in Obsidian.</p>
+            
+            <div class="code-box">
+                <code id="auth-code"></code>
+            </div>
+            <button class="copy-button" onclick="copyCode()">📋 Copy Code</button>
+            
+            <div class="instructions">
+                <strong>Instructions:</strong>
+                <ol>
+                    <li>Copy the code above</li>
+                    <li>Go back to Obsidian</li>
+                    <li>Paste the code in the authentication dialog</li>
+                </ol>
+            </div>
+        </div>
+
+        <!-- No code present -->
+        <div id="no-code" class="hidden">
+            <div class="status error">
+                No Authorization Code
+            </div>
+            <p>This page is used for OAuth authentication with the Catchment Obsidian plugin.</p>
+            <p style="margin-top: 16px;">If you're trying to authenticate, please start the process from within Obsidian.</p>
+        </div>
+    </div>
+
+    <script>
+        // Parse URL parameters
+        function getUrlParams() {
+            const params = new URLSearchParams(window.location.search);
+            return {
+                code: params.get('code'),
+                state: params.get('state'),
+                error: params.get('error'),
+                errorDescription: params.get('error_description')
+            };
+        }
+
+        // Show a specific section
+        function showSection(id) {
+            document.querySelectorAll('.container > div').forEach(el => {
+                el.classList.add('hidden');
+            });
+            document.getElementById(id).classList.remove('hidden');
+        }
+
+        // Build Obsidian redirect URL
+        function buildObsidianUrl(code, state) {
+            const params = new URLSearchParams();
+            params.set('code', code);
+            if (state) params.set('state', state);
+            return `obsidian://catchment-oauth-callback?${params.toString()}`;
+        }
+
+        // Copy code to clipboard
+        function copyCode() {
+            const code = document.getElementById('auth-code').textContent;
+            navigator.clipboard.writeText(code).then(() => {
+                const btn = document.querySelector('.copy-button');
+                btn.textContent = '✓ Copied!';
+                setTimeout(() => {
+                    btn.textContent = '📋 Copy Code';
+                }, 2000);
+            });
+        }
+
+        // Main logic
+        function init() {
+            const params = getUrlParams();
+
+            // Check for errors
+            if (params.error) {
+                showSection('error');
+                const message = params.errorDescription || params.error;
+                document.getElementById('error-message').textContent = `Error: ${message}`;
+                return;
+            }
+
+            // Check for authorization code
+            if (!params.code) {
+                showSection('no-code');
+                return;
+            }
+
+            // We have a code - try to redirect to Obsidian
+            showSection('waiting');
+
+            const obsidianUrl = buildObsidianUrl(params.code, params.state);
+            
+            // Set up the manual redirect link
+            document.getElementById('manual-redirect').href = obsidianUrl;
+
+            // Try to redirect automatically
+            setTimeout(() => {
+                showSection('success');
+                
+                // Attempt redirect
+                window.location.href = obsidianUrl;
+
+                // If we're still here after 2 seconds, show manual options
+                setTimeout(() => {
+                    // Check if we're still on this page (redirect didn't work)
+                    // The page might still be visible if the redirect opened Obsidian in background
+                    document.getElementById('auth-code').textContent = params.code;
+                }, 2000);
+            }, 500);
+        }
+
+        // Run on page load
+        init();
+    </script>
+</body>
+</html>

@@ -31,17 +31,31 @@ const context = await esbuild.context({
 		'@lezer/common',
 		'@lezer/highlight',
 		'@lezer/lr',
-		...builtins],
+		// Node.js builtins - mark as external so they're not bundled
+		// On mobile, these will fail to load but our code handles that gracefully
+		...builtins,
+	],
 	format: 'cjs',
 	target: 'es2018',
 	logLevel: "info",
 	sourcemap: prod ? false : 'inline',
 	treeShaking: true,
 	outfile: 'main.js',
-	platform: 'node',
+	// Changed from 'node' to 'neutral' for cross-platform compatibility
+	// 'neutral' doesn't assume any runtime environment
+	platform: 'neutral',
+	// Provide shims/definitions for Node.js globals that might be referenced
 	define: {
-		'global': 'globalThis'
-	}
+		'global': 'globalThis',
+		// Prevent any inline crypto references from being treated as Node.js crypto
+		'process.env.NODE_ENV': prod ? '"production"' : '"development"',
+	},
+	// Ensure we don't inject any Node.js polyfills
+	inject: [],
+	// Main fields resolution order - prefer browser/module entries
+	mainFields: ['browser', 'module', 'main'],
+	// Conditions for package.json exports field
+	conditions: ['browser', 'import', 'default'],
 });
 
 if (prod) {

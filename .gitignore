@@ -24,6 +24,9 @@ data.json
 *.swo
 *~
 
+# Debugging files
+old-main.ts
+
 # OS generated files
 .DS_Store
 .DS_Store?
