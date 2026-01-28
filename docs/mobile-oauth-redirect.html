@@ -81,6 +81,9 @@
             font-weight: 600;
             margin-top: 20px;
             transition: background 0.2s;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
         }
         .button:hover {
             background: #6d28d9;
@@ -92,6 +95,12 @@
         .button.secondary:hover {
             background: rgba(255, 255, 255, 0.2);
         }
+        .button.large {
+            padding: 18px 36px;
+            font-size: 18px;
+            width: 100%;
+            margin-top: 16px;
+        }
         .code-box {
             background: rgba(0, 0, 0, 0.3);
             border-radius: 8px;
@@ -102,19 +111,25 @@
             word-break: break-all;
             text-align: left;
             border: 1px solid rgba(255, 255, 255, 0.1);
+            max-height: 120px;
+            overflow-y: auto;
         }
         .copy-button {
             background: #7c3aed;
             color: white;
             border: none;
-            padding: 8px 16px;
+            padding: 12px 24px;
             border-radius: 4px;
             cursor: pointer;
-            font-size: 14px;
+            font-size: 16px;
             margin-top: 8px;
+            width: 100%;
         }
         .copy-button:hover {
             background: #6d28d9;
+        }
+        .copy-button.copied {
+            background: #28a745;
         }
         .instructions {
             text-align: left;
@@ -136,6 +151,31 @@
             line-height: 1.6;
             color: #b0b0b0;
         }
+        .divider {
+            margin: 24px 0;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            position: relative;
+        }
+        .divider span {
+            background: #1a1a2e;
+            padding: 0 12px;
+            position: absolute;
+            top: -10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #888;
+            font-size: 14px;
+        }
+        .note {
+            font-size: 13px;
+            color: #888;
+            margin-top: 12px;
+        }
+        .attempt-info {
+            font-size: 12px;
+            color: #666;
+            margin-top: 8px;
+        }
     </style>
 </head>
 <body>
@@ -149,21 +189,41 @@
                 <span class="spinner"></span>
                 Processing authentication...
             </div>
-            <p>Please wait while we redirect you back to Obsidian.</p>
+            <p>Please wait while we prepare your redirect to Obsidian.</p>
         </div>
 
-        <!-- Success state - auto redirect -->
+        <!-- Success state with button to open Obsidian -->
         <div id="success" class="hidden">
             <div class="status success">
                 ✓ Authentication successful!
             </div>
-            <p>Redirecting you back to Obsidian...</p>
-            <a id="manual-redirect" href="#" class="button">
-                Open Obsidian Manually
+            <p>Tap the button below to complete authentication in Obsidian:</p>
+            
+            <a id="open-obsidian-btn" href="#" class="button large">
+                Open Obsidian
             </a>
-            <p style="margin-top: 16px; font-size: 14px;">
-                If you're not redirected automatically, tap the button above.
+            
+            <p class="note">
+                If the button doesn't work, use the manual method below.
             </p>
+            
+            <div class="divider"><span>or</span></div>
+            
+            <p style="margin-bottom: 12px;">Copy the code and paste it in Obsidian:</p>
+            <div class="code-box">
+                <code id="auth-code-success"></code>
+            </div>
+            <button id="copy-btn-success" class="copy-button" onclick="copyCode('auth-code-success', 'copy-btn-success')">📋 Copy Code</button>
+            
+            <div class="instructions">
+                <strong>Manual Instructions:</strong>
+                <ol>
+                    <li>Copy the code above</li>
+                    <li>Open Obsidian manually</li>
+                    <li>In the waiting dialog, tap "Redirect didn't work? Enter code manually"</li>
+                    <li>Paste the code and submit</li>
+                </ol>
+            </div>
         </div>
 
         <!-- Error state -->
@@ -172,29 +232,7 @@
                 ✗ Authentication failed
             </div>
             <p id="error-message"></p>
-            <a href="#" onclick="window.close()" class="button secondary">Close Window</a>
-        </div>
-
-        <!-- Manual code entry fallback -->
-        <div id="manual" class="hidden">
-            <div class="status waiting">
-                Manual Code Entry Required
-            </div>
-            <p>The automatic redirect didn't work. Please copy the code below and paste it in Obsidian.</p>
-            
-            <div class="code-box">
-                <code id="auth-code"></code>
-            </div>
-            <button class="copy-button" onclick="copyCode()">📋 Copy Code</button>
-            
-            <div class="instructions">
-                <strong>Instructions:</strong>
-                <ol>
-                    <li>Copy the code above</li>
-                    <li>Go back to Obsidian</li>
-                    <li>Paste the code in the authentication dialog</li>
-                </ol>
-            </div>
+            <button class="button secondary" onclick="window.close()">Close Window</button>
         </div>
 
         <!-- No code present -->
@@ -236,14 +274,40 @@
         }
 
         // Copy code to clipboard
-        function copyCode() {
-            const code = document.getElementById('auth-code').textContent;
+        function copyCode(codeElementId, buttonId) {
+            const code = document.getElementById(codeElementId).textContent;
+            const btn = document.getElementById(buttonId);
+            
             navigator.clipboard.writeText(code).then(() => {
-                const btn = document.querySelector('.copy-button');
                 btn.textContent = '✓ Copied!';
+                btn.classList.add('copied');
                 setTimeout(() => {
                     btn.textContent = '📋 Copy Code';
-                }, 2000);
+                    btn.classList.remove('copied');
+                }, 3000);
+            }).catch(err => {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = code;
+                textArea.style.position = 'fixed';
+                textArea.style.left = '-9999px';
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    btn.textContent = '✓ Copied!';
+                    btn.classList.add('copied');
+                    setTimeout(() => {
+                        btn.textContent = '📋 Copy Code';
+                        btn.classList.remove('copied');
+                    }, 3000);
+                } catch (e) {
+                    btn.textContent = '❌ Copy failed';
+                    setTimeout(() => {
+                        btn.textContent = '📋 Copy Code';
+                    }, 2000);
+                }
+                document.body.removeChild(textArea);
             });
         }
 
@@ -265,28 +329,54 @@
                 return;
             }
 
-            // We have a code - try to redirect to Obsidian
+            // We have a code - show the success state with manual button
             showSection('waiting');
 
             const obsidianUrl = buildObsidianUrl(params.code, params.state);
             
-            // Set up the manual redirect link
-            document.getElementById('manual-redirect').href = obsidianUrl;
-
-            // Try to redirect automatically
+            // Brief delay then show success screen
             setTimeout(() => {
                 showSection('success');
                 
-                // Attempt redirect
-                window.location.href = obsidianUrl;
-
-                // If we're still here after 2 seconds, show manual options
+                // Set the code in the display box
+                document.getElementById('auth-code-success').textContent = params.code;
+                
+                // Set up the button to open Obsidian
+                const openBtn = document.getElementById('open-obsidian-btn');
+                openBtn.href = obsidianUrl;
+                
+                // On iOS, we need user interaction to open custom URL schemes
+                // The link will work when tapped, but we can also try window.location
+                // after a brief delay as a backup
+                
+                // Try automatic redirect after a short delay
+                // This works on some Android devices
                 setTimeout(() => {
-                    // Check if we're still on this page (redirect didn't work)
-                    // The page might still be visible if the redirect opened Obsidian in background
-                    document.getElementById('auth-code').textContent = params.code;
-                }, 2000);
+                    // Use an iframe trick that sometimes works better for custom schemes
+                    tryOpenObsidian(obsidianUrl);
+                }, 300);
             }, 500);
+        }
+
+        // Try various methods to open Obsidian
+        function tryOpenObsidian(url) {
+            // Method 1: Hidden iframe (works on some mobile browsers)
+            const iframe = document.createElement('iframe');
+            iframe.style.display = 'none';
+            iframe.src = url;
+            document.body.appendChild(iframe);
+            
+            // Method 2: window.location (fallback)
+            setTimeout(() => {
+                window.location.href = url;
+            }, 100);
+            
+            // Clean up iframe after a delay
+            setTimeout(() => {
+                if (iframe.parentNode) {
+                    iframe.parentNode.removeChild(iframe);
+                }
+            }, 2000);
         }
 
         // Run on page load

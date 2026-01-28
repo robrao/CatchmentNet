@@ -7414,9 +7414,9 @@ if (!import_obsidian2.Platform.isMobile) {
   }
 }
 var DEFAULT_SETTINGS = {
-  // client_id: "116037380548-ac8rt3r3nb78ehqfj11gkn9i11jiu3eq.apps.googleusercontent.com", // UWP
   client_id: "116037380548-t8au61erg75pc4n1e9h2jrmoo4h5lk0s.apps.googleusercontent.com",
   // Web
+  client_secret: "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",
   access_token: null,
   catchementFolder: "Catchment",
   maxEmails: 50,
@@ -7429,7 +7429,7 @@ var DEFAULT_SETTINGS = {
   // Mobile uses a hosted redirect page that forwards to obsidian:// URI
   // Host oauth-redirect.html on GitHub Pages and update this URL
   // Then register this URL in Google Cloud Console as an authorized redirect URI
-  redirect_uri_mobile: "https://robrao.github.io/CatchmentNet/oauth-redirect.html",
+  redirect_uri_mobile: "https://robrao.github.io/CatchmentNet/mobile-oauth-redirect.html",
   refresh_token: "",
   token_type: "",
   refresh_token_expires_in: 0,
@@ -7699,6 +7699,12 @@ var CatchementPlugin = class extends import_obsidian2.Plugin {
     }
     try {
       const tokens = await this.exchangeCodeForTokens(params.code, this.settings.pkce_verifier);
+      this.settings.access_token = tokens.access_token;
+      this.settings.refresh_token = tokens.refresh_token;
+      this.settings.expiry_date = tokens.expiry_date;
+      this.settings.refresh_token_expires_in = tokens.refresh_token_expires_in * 1e3;
+      this.settings.last_refreshed_date = Date.now();
+      this.settings.refresh_token_expiry = this.settings.last_refreshed_date + this.settings.refresh_token_expires_in;
       delete this.settings.pkce_verifier;
       delete this.settings.pkce_state;
       await this.saveSettings();
@@ -8243,6 +8249,7 @@ tags: [nostr, article, longform]
   async exchangeCodeForTokens(code, verifier) {
     const params = new URLSearchParams({
       client_id: this.settings.client_id,
+      client_secret: this.settings.client_secret,
       code,
       code_verifier: verifier,
       grant_type: "authorization_code",
