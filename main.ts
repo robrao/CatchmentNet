@@ -580,15 +580,12 @@ export default class CatchementPlugin extends Plugin {
 		// Use globalThis.crypto which works in both browser and modern Node.js
 		// This avoids any import of the Node.js 'crypto' module
 		if (typeof globalThis !== 'undefined' && globalThis.crypto) {
-			console.log(`Using globalThis for crypto package`)
 			return globalThis.crypto;
 		}
 		if (typeof window !== 'undefined' && window.crypto) {
-			console.log(`Using window.crypto for crypto package`)
 			return window.crypto;
 		}
 		if (typeof self !== 'undefined' && self.crypto) {
-			console.log(`Using self.crypto for crypto package`)
 			return self.crypto;
 		}
 		throw new Error('Web Crypto API not available');
@@ -830,14 +827,10 @@ tags: [nostr, article, longform]
 	}
 
 	async getNewTokens(): Promise<GmailTokens> {
-		// DEBUG
-		console.log(`GET TOKENS AUTH`)
 		if (this.authorizationInProgress && this.authorizationPromise) {
 			console.log('Authorization already in progress, waiting for existing flow to complete');
 			return this.authorizationPromise;
 		}
-		// DEBUG
-		console.log(`GET TOKENS AUTH 2`)
 
 		this.authorizationInProgress = true;
 
@@ -1297,11 +1290,7 @@ tags: [nostr, article, longform]
 
 	// Gmail API methods using fetch (cross-platform)
 	async listGmailMessages(params: any = {}): Promise<any> {
-		// DEBUG
-		console.log(`LIST GMAIL MESSAGES INIT AUTH NEXT`)
 		const authInitialized = await this.initializeGoogleAuth();
-		// DEBUG
-		console.log(`LIST GMAIL MESSAGES INIT AUTH DONE`)
 		if (!authInitialized) {
 			return null;
 		}
