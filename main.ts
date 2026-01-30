@@ -75,8 +75,8 @@ interface GmailTokens {
 }
 
 const DEFAULT_SETTINGS: CatchementSettings = {
-	client_id: "116037380548-t8au61erg75pc4n1e9h2jrmoo4h5lk0s.apps.googleusercontent.com", // Web
-	client_secret: "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",
+	client_id: process.env.CATCHMENT_CLIENT_ID || "",
+	client_secret: process.env.CATCHMENT_CLIENT_SECRET || "",
 	access_token: null,
 	catchementFolder: 'Catchment',
 	maxEmails: 50,

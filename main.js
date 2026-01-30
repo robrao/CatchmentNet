@@ -7415,7 +7415,6 @@ if (!import_obsidian2.Platform.isMobile) {
 }
 var DEFAULT_SETTINGS = {
   client_id: "116037380548-t8au61erg75pc4n1e9h2jrmoo4h5lk0s.apps.googleusercontent.com",
-  // Web
   client_secret: "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",
   access_token: null,
   catchementFolder: "Catchment",
@@ -7806,15 +7805,12 @@ var CatchementPlugin = class extends import_obsidian2.Plugin {
   // Explicitly use globalThis.crypto to avoid Node.js crypto module being bundled
   getWebCrypto() {
     if (typeof globalThis !== "undefined" && globalThis.crypto) {
-      console.log(`Using globalThis for crypto package`);
       return globalThis.crypto;
     }
     if (typeof window !== "undefined" && window.crypto) {
-      console.log(`Using window.crypto for crypto package`);
       return window.crypto;
     }
     if (typeof self !== "undefined" && self.crypto) {
-      console.log(`Using self.crypto for crypto package`);
       return self.crypto;
     }
     throw new Error("Web Crypto API not available");
@@ -8001,12 +7997,10 @@ tags: [nostr, article, longform]
     return `${this.settings.auth_uri}?${params.toString()}`;
   }
   async getNewTokens() {
-    console.log(`GET TOKENS AUTH`);
     if (this.authorizationInProgress && this.authorizationPromise) {
       console.log("Authorization already in progress, waiting for existing flow to complete");
       return this.authorizationPromise;
     }
-    console.log(`GET TOKENS AUTH 2`);
     this.authorizationInProgress = true;
     try {
       if (import_obsidian2.Platform.isMobile) {
@@ -8177,7 +8171,7 @@ tags: [nostr, article, longform]
 										<h1 style="color: #d73a49;">Authentication Failed</h1>
 										<p>Error: ${error}</p>
 										<p>${errorDescription}</p>
-										<script>setTimeout(() => window.close(), 3000);</script>
+										<script>setTimeout(() => window.close(), 3000);<\/script>
 									</body>
 								</html>
 							`);
@@ -8192,7 +8186,7 @@ tags: [nostr, article, longform]
 									<body>
 										<h1 style="color: #d73a49;">Authentication Failed</h1>
 										<p>No authorization code received.</p>
-										<script>setTimeout(() => window.close(), 3000);</script>
+										<script>setTimeout(() => window.close(), 3000);<\/script>
 									</body>
 								</html>
 							`);
@@ -8211,7 +8205,7 @@ tags: [nostr, article, longform]
 									<body>
 										<h1 style="color: #28a745;">Authentication Successful!</h1>
 										<p>You can now use the Gmail sync feature.</p>
-										<script>window.close();</script>
+										<script>window.close();<\/script>
 									</body>
 								</html>
 							`);
@@ -8224,7 +8218,7 @@ tags: [nostr, article, longform]
 									<body>
 										<h1 style="color: #d73a49;">Token Exchange Failed</h1>
 										<p>${tokenError.message}</p>
-										<script>setTimeout(() => window.close(), 3000);</script>
+										<script>setTimeout(() => window.close(), 3000);<\/script>
 									</body>
 								</html>
 							`);
@@ -8388,9 +8382,7 @@ tags: [nostr, article, longform]
   }
   // Gmail API methods using fetch (cross-platform)
   async listGmailMessages(params = {}) {
-    console.log(`LIST GMAIL MESSAGES INIT AUTH NEXT`);
     const authInitialized = await this.initializeGoogleAuth();
-    console.log(`LIST GMAIL MESSAGES INIT AUTH DONE`);
     if (!authInitialized) {
       return null;
     }
