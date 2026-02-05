@@ -32,11 +32,11 @@ export interface NostrAuthor {
 	lastUpdated?: number;
 }
 
-interface CatchementSettings {
+interface CatchmentSettings {
 	client_id: string;
 	client_secret: string;
 	access_token: string;
-	catchementFolder: string;
+	catchmentFolder: string;
 	maxEmails: number;
 	syncFrequency: number; // in minutes
 	scopes: Array<string>;
@@ -74,11 +74,11 @@ interface GmailTokens {
 	expiry_date: number;
 }
 
-const DEFAULT_SETTINGS: CatchementSettings = {
+const DEFAULT_SETTINGS: CatchmentSettings = {
 	client_id: process.env.CATCHMENT_CLIENT_ID || "",
 	client_secret: process.env.CATCHMENT_CLIENT_SECRET || "",
 	access_token: null,
-	catchementFolder: 'Catchment',
+	catchmentFolder: 'Catchment',
 	maxEmails: 50,
 	syncFrequency: 120, // NOTE: default to two hours
 	scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
@@ -282,8 +282,8 @@ class MobileOAuthWaitingModal extends Modal {
 	}
 }
 
-export default class CatchementPlugin extends Plugin {
-	settings: CatchementSettings;
+export default class CatchmentPlugin extends Plugin {
+	settings: CatchmentSettings;
 	syncInterval: number | null = null;
 	nostrSyncInterval: number | null = null;
 	nostrClient: NostrNIP23Client | null = null;
@@ -491,7 +491,7 @@ export default class CatchementPlugin extends Plugin {
 		}
 
 		// Open the extraction modal
-		const modal = new NoteModal(this.app, this, selectedText.trim(), view.file, this.settings.catchementFolder);
+		const modal = new NoteModal(this.app, this, selectedText.trim(), view.file, this.settings.catchmentFolder);
 		modal.open();
 	}
 
@@ -650,11 +650,11 @@ export default class CatchementPlugin extends Plugin {
 
 		try {
 			// Ensure folder exists
-			await this.ensureFolderExists(this.settings.catchementFolder);
+			await this.ensureFolderExists(this.settings.catchmentFolder);
 
 			// Get existing files to avoid duplicates
 			const existingFiles = new Set<string>();
-			const folder = this.app.vault.getAbstractFileByPath(this.settings.catchementFolder);
+			const folder = this.app.vault.getAbstractFileByPath(this.settings.catchmentFolder);
 			if (folder && folder instanceof TFolder) {
 				folder.children.forEach((file) => {
 					if (file instanceof TFile) {
@@ -709,7 +709,7 @@ export default class CatchementPlugin extends Plugin {
 
 			const markdownContent = this.createNostrMarkdownContent(article);
 
-			const filePath = `${this.settings.catchementFolder}/${filename}.md`;
+			const filePath = `${this.settings.catchmentFolder}/${filename}.md`;
 			await this.app.vault.create(filePath, markdownContent);
 
 			existingFiles.add(filename);
@@ -1141,7 +1141,18 @@ tags: [nostr, article, longform]
 		});
 
 		if (!response.ok) {
-			const errorData = await response.json();
+			const errorText = await response.text();
+			console.error('Token exchange error response:', {
+				status: response.status,
+				statusText: response.statusText,
+				body: errorText
+			});
+			let errorData;
+			try {
+				errorData = JSON.parse(errorText);
+			} catch {
+				throw new Error(`Token exchange failed: ${response.status} ${response.statusText} - ${errorText}`);
+			}
 			throw new Error(`Token exchange failed: ${errorData.error_description || errorData.error}`);
 		}
 
@@ -1374,15 +1385,6 @@ tags: [nostr, article, longform]
 	}
 
 	async syncNewsletters() {
-		// // DEBUG
-		// console.log(`Sync Newletters`)
-		// if (!this.settings.access_token && !this.settings.refresh_token) {
-		// 	new Notice('Please configure Gmail authentication in settings first.');
-		// 	return;
-		// }
-
-		// // DEBUG
-		// console.log(`Second Sync Newletters`)
 		new Notice('Syncing Substack newsletters...');
 
 		try {
@@ -1401,7 +1403,7 @@ tags: [nostr, article, longform]
 			let processedCount = 0;
 			const existingFiles = new Set<string>();
 
-			const folder = this.app.vault.getAbstractFileByPath(this.settings.catchementFolder);
+			const folder = this.app.vault.getAbstractFileByPath(this.settings.catchmentFolder);
 			if (folder && folder instanceof TFolder) {
 				folder.children.forEach((file) => {
 					if (file instanceof TFile) {
@@ -1463,9 +1465,9 @@ tags: [nostr, article, longform]
 			content
 		);
 
-		await this.ensureFolderExists(this.settings.catchementFolder);
+		await this.ensureFolderExists(this.settings.catchmentFolder);
 
-		const filePath = `${this.settings.catchementFolder}/${filename}.md`;
+		const filePath = `${this.settings.catchmentFolder}/${filename}.md`;
 		await this.app.vault.create(filePath, markdownContent);
 
 		return true;
@@ -1526,7 +1528,7 @@ tags: [newsletter, substack]
 }
 
 class CatchmentSettingTab extends PluginSettingTab {
-	plugin: CatchementPlugin;
+	plugin: CatchmentPlugin;
 
 	nostrClient = new NostrNIP23Client([
 		"wss://relay.damus.io",
@@ -1534,7 +1536,7 @@ class CatchmentSettingTab extends PluginSettingTab {
 		"wss://relay.snort.social"
 	])
 
-	constructor(app: App, plugin: CatchementPlugin) {
+	constructor(app: App, plugin: CatchmentPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
@@ -1560,9 +1562,9 @@ class CatchmentSettingTab extends PluginSettingTab {
 			.setDesc('Folder where substack and nostr articles will be saved')
 			.addText(text => text
 				.setPlaceholder('Substack Newsletters')
-				.setValue(this.plugin.settings.catchementFolder)
+				.setValue(this.plugin.settings.catchmentFolder)
 				.onChange(async (value) => {
-					this.plugin.settings.catchementFolder = value;
+					this.plugin.settings.catchmentFolder = value;
 					await this.plugin.saveSettings();
 				}));
 
