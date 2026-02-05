@@ -43,10 +43,10 @@ function loadEnvFile() {
 loadEnvFile();
 
 // Get OAuth credentials from environment variables
-const CATCHMENT_CLIENT_ID_CLIENT_ID = process.env.CATCHMENT_CLIENT_ID || "";
+const CATCHMENT_CLIENT_ID = process.env.CATCHMENT_CLIENT_ID || "";
 const CATCHMENT_CLIENT_SECRET = process.env.CATCHMENT_CLIENT_SECRET || "";
 
-if (!CATCHMENT_CLIENT_ID_CLIENT_ID || !CATCHMENT_CLIENT_SECRET) {
+if (!CATCHMENT_CLIENT_ID || !CATCHMENT_CLIENT_SECRET) {
 	console.warn("\n⚠️  Warning: OAuth credentials not found in environment variables.");
 	console.warn("   Set CATCHMENT_CLIENT_ID and CATCHMENT_CLIENT_SECRET before building.\n");
 	console.warn("   Option 1: Create a .env file with:");
@@ -57,7 +57,7 @@ if (!CATCHMENT_CLIENT_ID_CLIENT_ID || !CATCHMENT_CLIENT_SECRET) {
 	console.warn("      export CATCHMENT_CLIENT_SECRET=your-client-secret\n");
 } else {
 	console.log('✅ OAuth credentials loaded successfully');
-	console.log(`   Client ID: ${CATCHMENT_CLIENT_ID_CLIENT_ID.substring(0, 20)}...`);
+	console.log(`   Client ID: ${CATCHMENT_CLIENT_ID.substring(0, 20)}...`);
 }
 
 const context = await esbuild.context({
@@ -90,7 +90,7 @@ const context = await esbuild.context({
 	outfile: "main.js",
 	// This is the key part - define compile-time constants
 	define: {
-		"process.env.CATCHMENT_CLIENT_ID": JSON.stringify(CATCHMENT_CLIENT_ID_CLIENT_ID),
+		"process.env.CATCHMENT_CLIENT_ID": JSON.stringify(CATCHMENT_CLIENT_ID),
 		"process.env.CATCHMENT_CLIENT_SECRET": JSON.stringify(CATCHMENT_CLIENT_SECRET),
 	},
 	// Ensure we're building for browser environment (important for mobile)
