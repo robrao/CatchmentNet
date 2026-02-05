@@ -18,9 +18,9 @@
 	"author": "Robby Rao",
 	"license": "MIT",
 	"dependencies": {
-		"google-auth-library": "^9.0.0",
-		"googleapis": "^140.0.1",
-		"nostr-tools": "^2.17.0",
+		"nostr-tools": "^2.17.0"
+	},
+	"optionalDependencies": {
 		"server-destroy": "^1.0.1"
 	},
 	"devDependencies": {

@@ -6,6 +6,7 @@ yarn-error.log*
 
 # Build outputs
 main.js.map
+main.js
 *.tsbuildinfo
 
 # Environment variables
@@ -23,6 +24,9 @@ data.json
 *.swp
 *.swo
 *~
+
+# Debugging files
+old-main.ts
 
 # OS generated files
 .DS_Store
