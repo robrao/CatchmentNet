@@ -810,22 +810,6 @@ tags: [nostr, article, longform]
 		return this.settings.redirect_uris[0];
 	}
 
-	private buildAuthUrl(verifier: string, state: string): string {
-		const params = new URLSearchParams({
-			client_id: this.settings.client_id,
-			redirect_uri: this.getRedirectUri(),
-			response_type: 'code',
-			scope: this.settings.scopes.join(' '),
-			access_type: 'offline',
-			prompt: 'consent',
-			state: state,
-			code_challenge: '', // Will be set below
-			code_challenge_method: 'S256'
-		});
-
-		return `${this.settings.auth_uri}?${params.toString()}`;
-	}
-
 	async getNewTokens(): Promise<GmailTokens> {
 		if (this.authorizationInProgress && this.authorizationPromise) {
 			console.log('Authorization already in progress, waiting for existing flow to complete');
@@ -1084,7 +1068,7 @@ tags: [nostr, article, longform]
 									<body>
 										<h1 style="color: #28a745;">Authentication Successful!</h1>
 										<p>You can now use the Gmail sync feature.</p>
-										<script>window.close();</script>
+										<script>window.close(); setTimeout(function(){ window.location.replace('about:blank'); }, 100);</script>
 									</body>
 								</html>
 							`);
