@@ -1522,10 +1522,10 @@ tags: [catchment-index]
 # Catchment
 
 \`\`\`dataview
-TABLE coalesce(date, published) AS "Date", author, type AS "Source"
+TABLE default(date, published) AS "Date", author, type AS "Source"
 FROM "${folderPath}"
 WHERE type = "substack-newsletter" OR type = "nostr-article"
-SORT coalesce(date, published) DESC
+SORT default(date, published) DESC
 \`\`\`
 `;
 		await this.app.vault.create(indexPath, content);
