@@ -1441,11 +1441,12 @@ tags: [nostr, article, longform]
 			content = message.snippet || 'No content available';
 		}
 
+		const parsedDate = date ? new Date(date).toISOString() : new Date().toISOString();
 		const markdownContent = this.createMarkdownContent(
 			subject.replace(/"/g, ''),
 			publication.replace(/"/g, ''),
 			from.replace(/" /g, ''),
-			date,
+			parsedDate,
 			content
 		);
 
