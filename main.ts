@@ -1508,6 +1508,27 @@ tags: [newsletter, substack]
 		if (!folder) {
 			await this.app.vault.createFolder(folderPath);
 		}
+		await this.ensureIndexNoteExists(folderPath);
+	}
+
+	async ensureIndexNoteExists(folderPath: string) {
+		const indexPath = `${folderPath}/_index.md`;
+		if (this.app.vault.getAbstractFileByPath(indexPath)) {
+			return;
+		}
+		const content = `---
+tags: [catchment-index]
+---
+# Catchment
+
+\`\`\`dataview
+TABLE coalesce(date, published) AS "Date", author, type AS "Source"
+FROM "${folderPath}"
+WHERE type = "substack-newsletter" OR type = "nostr-article"
+SORT coalesce(date, published) DESC
+\`\`\`
+`;
+		await this.app.vault.create(indexPath, content);
 	}
 }
 
